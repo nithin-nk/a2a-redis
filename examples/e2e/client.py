@@ -53,7 +53,7 @@ async def _build_client(base_url: str, user_name: str):
     AgentCard from ``<base_url>/.well-known/agent-card.json`` and uses the
     HTTP+JSON transport.
     """
-    httpx_client = httpx.AsyncClient(headers={'x-a2a-user': user_name})
+    httpx_client = httpx.AsyncClient(headers={"x-a2a-user": user_name})
     factory = ClientFactory(
         config=ClientConfig(
             httpx_client=httpx_client,
@@ -78,9 +78,7 @@ def _user_message(text: str, message_id: str) -> Message:
 # ---------------------------------------------------------------------------
 
 
-async def scenario_send_and_get(
-    base_url: str, user_name: str = 'alice'
-) -> str:
+async def scenario_send_and_get(base_url: str, user_name: str = "alice") -> str:
     """Send a single non-streaming message, poll until complete, return id.
 
     Asserts the resulting artifact text matches ``HELLO (processed)``.
@@ -89,14 +87,14 @@ async def scenario_send_and_get(
     try:
         client._config.streaming = False
         config = SendMessageConfiguration(return_immediately=True)
-        message = _user_message('hello', 'msg-e2e-send-and-get')
+        message = _user_message("hello", "msg-e2e-send-and-get")
         request = SendMessageRequest(message=message, configuration=config)
 
         events: list[Any] = []
         async for ev in client.send_message(request=request):
             events.append(ev)
         if not events:
-            raise RuntimeError('No response events from send_message')
+            raise RuntimeError("No response events from send_message")
         task_id = events[0].task.id
 
         # Poll until the task reaches a terminal state. The executor sleeps
@@ -108,18 +106,16 @@ async def scenario_send_and_get(
             await asyncio.sleep(0.05)
         else:  # pragma: no cover - defensive
             raise RuntimeError(
-                f'Task {task_id} did not complete in time '
-                f'(state={task.status.state})'
+                f"Task {task_id} did not complete in time (state={task.status.state})"
             )
 
         if not task.artifacts:
-            raise AssertionError('Completed task is missing artifacts')
+            raise AssertionError("Completed task is missing artifacts")
         artifact = task.artifacts[0]
-        text = artifact.parts[0].text if artifact.parts else ''
-        if text != 'HELLO (processed)':
+        text = artifact.parts[0].text if artifact.parts else ""
+        if text != "HELLO (processed)":
             raise AssertionError(
-                f'Unexpected artifact text {text!r}; '
-                'expected "HELLO (processed)"'
+                f'Unexpected artifact text {text!r}; expected "HELLO (processed)"'
             )
         return task_id
     finally:
@@ -127,9 +123,7 @@ async def scenario_send_and_get(
         await httpx_client.aclose()
 
 
-async def scenario_streaming(
-    base_url: str, user_name: str = 'alice'
-) -> list[Any]:
+async def scenario_streaming(base_url: str, user_name: str = "alice") -> list[Any]:
     """Stream a message and return all events collected before the stream closes.
 
     The transport yields ``StreamResponse`` wrapper messages whose ``WhichOneof``
@@ -140,7 +134,7 @@ async def scenario_streaming(
     client, httpx_client = await _build_client(base_url, user_name)
     try:
         client._config.streaming = True
-        message = _user_message('stream me', 'msg-e2e-streaming')
+        message = _user_message("stream me", "msg-e2e-streaming")
         request = SendMessageRequest(message=message)
 
         events: list[Any] = []
@@ -162,11 +156,11 @@ def _unwrap_stream_event(ev: Any) -> Any:
     we route through that; otherwise we return ``ev`` unchanged so callers
     can also handle already-unwrapped events.
     """
-    which = getattr(ev, 'WhichOneof', None)
+    which = getattr(ev, "WhichOneof", None)
     if which is None:
         return ev
     try:
-        field = which('payload')
+        field = which("payload")
     except Exception:
         return ev
     if not field:
@@ -175,7 +169,7 @@ def _unwrap_stream_event(ev: Any) -> Any:
 
 
 async def scenario_list_with_filters(
-    base_url: str, user_name: str = 'alice', count: int = 12
+    base_url: str, user_name: str = "alice", count: int = 12
 ) -> dict[str, list[tuple[int, str]]]:
     """Create ``count`` tasks across two context_ids and exercise list filters.
 
@@ -188,28 +182,26 @@ async def scenario_list_with_filters(
         client._config.streaming = False
         config = SendMessageConfiguration(return_immediately=True)
 
-        contexts = ['ctx-a', 'ctx-b']
+        contexts = ["ctx-a", "ctx-b"]
         # Create ``count`` tasks, interleaving context_ids so the per-context
         # filter has at least 2 non-trivial pages.
         for i in range(count):
             ctx = contexts[i % 2]
             message = Message(
                 role=Role.ROLE_USER,
-                message_id=f'msg-e2e-list-{i}',
+                message_id=f"msg-e2e-list-{i}",
                 context_id=ctx,
-                parts=[Part(text=f'list {i}')],
+                parts=[Part(text=f"list {i}")],
             )
             # Drain the iterator so the server actually processes the task.
             async for _ in client.send_message(
-                request=SendMessageRequest(
-                    message=message, configuration=config
-                )
+                request=SendMessageRequest(message=message, configuration=config)
             ):
                 pass
 
         async def _paginate(req: ListTasksRequest) -> list[tuple[int, str]]:
             pages: list[tuple[int, str]] = []
-            token = ''
+            token = ""
             page_index = 0
             while True:
                 if token:
@@ -223,20 +215,16 @@ async def scenario_list_with_filters(
             return pages
 
         results: dict[str, list[tuple[int, str]]] = {}
-        results['by_context_a'] = await _paginate(
-            ListTasksRequest(page_size=5, context_id='ctx-a')
+        results["by_context_a"] = await _paginate(
+            ListTasksRequest(page_size=5, context_id="ctx-a")
         )
-        results['by_context_b'] = await _paginate(
-            ListTasksRequest(page_size=5, context_id='ctx-b')
+        results["by_context_b"] = await _paginate(
+            ListTasksRequest(page_size=5, context_id="ctx-b")
         )
-        results['by_status_completed'] = await _paginate(
-            ListTasksRequest(
-                page_size=5, status=TaskState.TASK_STATE_COMPLETED
-            )
+        results["by_status_completed"] = await _paginate(
+            ListTasksRequest(page_size=5, status=TaskState.TASK_STATE_COMPLETED)
         )
-        results['all_paginated'] = await _paginate(
-            ListTasksRequest(page_size=5)
-        )
+        results["all_paginated"] = await _paginate(ListTasksRequest(page_size=5))
         return results
     finally:
         await client.close()
@@ -246,8 +234,8 @@ async def scenario_list_with_filters(
 async def scenario_push_multi_owner_dispatch(
     base_url: str,
     webhook_url: str,
-    redis_url: str = 'redis://localhost:6379/15',
-    push_prefix: str = 'e2e:push:',
+    redis_url: str = "redis://localhost:6379/15",
+    push_prefix: str = "e2e:push:",
     encryption_key: str | None = None,
     encrypted: bool = False,
 ) -> tuple[str, int]:
@@ -278,7 +266,7 @@ async def scenario_push_multi_owner_dispatch(
     encrypted, ``encryption_key`` is required.
     """
     # Step 1: alice creates a task by sending an echo message.
-    alice, alice_http = await _build_client(base_url, 'alice')
+    alice, alice_http = await _build_client(base_url, "alice")
     try:
         alice._config.streaming = False
 
@@ -286,9 +274,7 @@ async def scenario_push_multi_owner_dispatch(
         first_event = await anext(
             alice.send_message(
                 request=SendMessageRequest(
-                    message=_user_message(
-                        'slow:push-please', 'msg-e2e-push-1'
-                    ),
+                    message=_user_message("slow:push-please", "msg-e2e-push-1"),
                     configuration=config,
                 )
             )
@@ -298,10 +284,10 @@ async def scenario_push_multi_owner_dispatch(
         # Step 2: alice registers her push config for this task via the API.
         await alice.create_task_push_notification_config(
             request=TaskPushNotificationConfig(
-                id='alice-cfg',
+                id="alice-cfg",
                 task_id=task_id,
                 url=webhook_url,
-                token='alice-token',
+                token="alice-token",
             )
         )
     finally:
@@ -335,14 +321,14 @@ async def scenario_push_multi_owner_dispatch(
             prefix=push_prefix,
             encryption_key=encryption_key if encrypted else None,
         )
-        bob_ctx = ServerCallContext(user=_NamedUser('bob'))
+        bob_ctx = ServerCallContext(user=_NamedUser("bob"))
         await store.set_info(
             task_id,
             TaskPushNotificationConfig(
-                id='bob-cfg',
+                id="bob-cfg",
                 task_id=task_id,
                 url=webhook_url,
-                token='bob-token',
+                token="bob-token",
             ),
             bob_ctx,
         )
@@ -359,51 +345,54 @@ async def scenario_push_multi_owner_dispatch(
 
 
 _SCENARIOS = {
-    'scenario_send_and_get': scenario_send_and_get,
-    'scenario_streaming': scenario_streaming,
-    'scenario_list_with_filters': scenario_list_with_filters,
-    'scenario_push_multi_owner_dispatch': scenario_push_multi_owner_dispatch,
+    "scenario_send_and_get": scenario_send_and_get,
+    "scenario_streaming": scenario_streaming,
+    "scenario_list_with_filters": scenario_list_with_filters,
+    "scenario_push_multi_owner_dispatch": scenario_push_multi_owner_dispatch,
 }
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='a2a-redis e2e client')
+    parser = argparse.ArgumentParser(description="a2a-redis e2e client")
     parser.add_argument(
-        'scenario', choices=sorted(_SCENARIOS.keys()),
+        "scenario",
+        choices=sorted(_SCENARIOS.keys()),
     )
     parser.add_argument(
-        '--base-url', default='http://localhost:18000',
-        help='Server base URL.',
+        "--base-url",
+        default="http://localhost:18000",
+        help="Server base URL.",
     )
     parser.add_argument(
-        '--webhook-url', default='http://localhost:18001/webhook',
-        help='Webhook URL (only used by the push scenario).',
+        "--webhook-url",
+        default="http://localhost:18001/webhook",
+        help="Webhook URL (only used by the push scenario).",
     )
-    parser.add_argument('--user', default='alice')
-    parser.add_argument('--count', type=int, default=12)
+    parser.add_argument("--user", default="alice")
+    parser.add_argument("--count", type=int, default=12)
     return parser.parse_args(argv)
 
 
 async def _dispatch(args: argparse.Namespace) -> Any:
     fn = _SCENARIOS[args.scenario]
-    if args.scenario == 'scenario_send_and_get':
+    if args.scenario == "scenario_send_and_get":
         return await fn(args.base_url, args.user)
-    if args.scenario == 'scenario_streaming':
+    if args.scenario == "scenario_streaming":
         events = await fn(args.base_url, args.user)
         return [type(e).__name__ for e in events]
-    if args.scenario == 'scenario_list_with_filters':
+    if args.scenario == "scenario_list_with_filters":
         return await fn(args.base_url, args.user, args.count)
-    if args.scenario == 'scenario_push_multi_owner_dispatch':
+    if args.scenario == "scenario_push_multi_owner_dispatch":
         return await fn(args.base_url, args.webhook_url)
-    raise ValueError(f'Unknown scenario: {args.scenario}')  # pragma: no cover
+    raise ValueError(f"Unknown scenario: {args.scenario}")  # pragma: no cover
 
 
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     result = asyncio.run(_dispatch(args))
     json.dump(result, sys.stdout, default=str, indent=2)
-    sys.stdout.write('\n')
+    sys.stdout.write("\n")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -57,7 +57,7 @@ from examples.e2e.scripted_executor import ScriptedAgentExecutor
 
 logger = logging.getLogger(__name__)
 
-USER_HEADER = 'x-a2a-user'
+USER_HEADER = "x-a2a-user"
 
 
 class _HeaderUser(User):
@@ -89,54 +89,52 @@ class _HeaderUserContextBuilder(DefaultServerCallContextBuilder):
         # Fall back to the default behaviour (Starlette scope-based) and then
         # finally to an explicit fallback so unauthenticated callers still
         # land on a deterministic owner string ("").
-        if 'user' in request.scope:
+        if "user" in request.scope:
             return super().build_user(request)
         # Env-overridable default user; useful for ad-hoc single-tenant runs.
-        default = os.environ.get('A2A_E2E_OWNER', '').strip()
+        default = os.environ.get("A2A_E2E_OWNER", "").strip()
         if default:
             return _HeaderUser(default)
         return UnauthenticatedUser()
 
 
 def _build_agent_card(port: int) -> AgentCard:
-    base_url = f'http://localhost:{port}'
+    base_url = f"http://localhost:{port}"
     return AgentCard(
-        name='redis-e2e-agent',
-        description='Redis-backed agent used by the a2a-redis e2e example.',
-        provider=AgentProvider(
-            organization='a2a-redis e2e', url='https://example.com'
-        ),
-        version='0.1.0',
+        name="redis-e2e-agent",
+        description="Redis-backed agent used by the a2a-redis e2e example.",
+        provider=AgentProvider(organization="a2a-redis e2e", url="https://example.com"),
+        version="0.1.0",
         capabilities=AgentCapabilities(
             streaming=True,
             push_notifications=True,
         ),
-        default_input_modes=['text'],
-        default_output_modes=['text', 'task-status'],
+        default_input_modes=["text"],
+        default_output_modes=["text", "task-status"],
         skills=[
             AgentSkill(
-                id='echo',
-                name='echo',
+                id="echo",
+                name="echo",
                 description=(
                     'Uppercases the input and appends " (processed)". '
                     'Special commands: "fail", "wait".'
                 ),
-                tags=['echo', 'e2e'],
-                examples=['hello', 'wait', 'fail'],
-                input_modes=['text'],
-                output_modes=['text', 'task-status'],
+                tags=["echo", "e2e"],
+                examples=["hello", "wait", "fail"],
+                input_modes=["text"],
+                output_modes=["text", "task-status"],
             )
         ],
         supported_interfaces=[
             AgentInterface(
-                protocol_binding='HTTP+JSON',
-                protocol_version='1.0',
-                url=f'{base_url}/a2a/rest',
+                protocol_binding="HTTP+JSON",
+                protocol_version="1.0",
+                url=f"{base_url}/a2a/rest",
             ),
             AgentInterface(
-                protocol_binding='JSONRPC',
-                protocol_version='1.0',
-                url=f'{base_url}/a2a/jsonrpc',
+                protocol_binding="JSONRPC",
+                protocol_version="1.0",
+                url=f"{base_url}/a2a/jsonrpc",
             ),
         ],
     )
@@ -150,16 +148,16 @@ def build_app(
     """Wire all components and return the runnable Starlette app."""
     redis_client = redis_async.from_url(redis_url)
 
-    task_store = RedisTaskStore(redis_client, prefix='e2e:task:')
+    task_store = RedisTaskStore(redis_client, prefix="e2e:task:")
     # queue_manager is kept around purely as an example of constructing one;
     # DefaultRequestHandler (v1.1) accepts it only for backward compatibility
     # and will not use it for event delivery.
     queue_manager = RedisStreamsQueueManager(  # noqa: F841
-        redis_client, prefix='e2e:queue:'
+        redis_client, prefix="e2e:queue:"
     )
     push_config_store = RedisPushNotificationConfigStore(
         redis_client,
-        prefix='e2e:push:',
+        prefix="e2e:push:",
         encryption_key=encryption_key,
     )
 
@@ -183,31 +181,27 @@ def build_app(
 
     rest_routes = create_rest_routes(
         request_handler=request_handler,
-        path_prefix='/a2a/rest',
+        path_prefix="/a2a/rest",
         context_builder=context_builder,
     )
     jsonrpc_routes = create_jsonrpc_routes(
         request_handler=request_handler,
-        rpc_url='/a2a/jsonrpc',
+        rpc_url="/a2a/jsonrpc",
         context_builder=context_builder,
     )
     agent_card_routes = create_agent_card_routes(agent_card=agent_card)
 
-    return Starlette(
-        routes=[*agent_card_routes, *jsonrpc_routes, *rest_routes]
-    )
+    return Starlette(routes=[*agent_card_routes, *jsonrpc_routes, *rest_routes])
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='a2a-redis e2e server')
-    parser.add_argument('--port', type=int, default=18000)
+    parser = argparse.ArgumentParser(description="a2a-redis e2e server")
+    parser.add_argument("--port", type=int, default=18000)
+    parser.add_argument("--redis-url", default="redis://localhost:6379/0")
     parser.add_argument(
-        '--redis-url', default='redis://localhost:6379/0'
-    )
-    parser.add_argument(
-        '--encryption-key',
+        "--encryption-key",
         default=None,
-        help='Optional URL-safe base64-encoded Fernet key for push configs.',
+        help="Optional URL-safe base64-encoded Fernet key for push configs.",
     )
     return parser.parse_args(argv)
 
@@ -220,14 +214,14 @@ async def _run(args: argparse.Namespace) -> None:
     )
     config = uvicorn.Config(
         app,
-        host='127.0.0.1',
+        host="127.0.0.1",
         port=args.port,
-        log_level='info',
+        log_level="info",
     )
     server = uvicorn.Server(config)
     # Emit READY once on stderr so the test harness can sync without
     # screen-scraping uvicorn's own startup output.
-    print(f'READY port={args.port}', file=sys.stderr, flush=True)
+    print(f"READY port={args.port}", file=sys.stderr, flush=True)
     await server.serve()
 
 
@@ -240,5 +234,5 @@ def main(argv: list[str] | None = None) -> None:
         pass
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

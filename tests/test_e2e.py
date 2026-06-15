@@ -23,7 +23,6 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Iterable
 
 import httpx
 import pytest
@@ -71,8 +70,7 @@ async def wait_for_url(url: str, timeout: float = 15.0) -> None:
                 last_exc = exc
             await asyncio.sleep(0.1)
     raise TimeoutError(
-        f"URL {url} did not become ready within {timeout}s "
-        f"(last error: {last_exc!r})"
+        f"URL {url} did not become ready within {timeout}s (last error: {last_exc!r})"
     )
 
 
@@ -105,13 +103,13 @@ async def wait_for_log(
     )
 
 
-def _spawn(argv: list[str], extra_env: dict[str, str] | None = None) -> subprocess.Popen:
+def _spawn(
+    argv: list[str], extra_env: dict[str, str] | None = None
+) -> subprocess.Popen:
     env = os.environ.copy()
     # Make `python -m examples.e2e.X` importable from the repo root.
     pythonpath = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = (
-        str(REPO_ROOT) + (os.pathsep + pythonpath if pythonpath else "")
-    )
+    env["PYTHONPATH"] = str(REPO_ROOT) + (os.pathsep + pythonpath if pythonpath else "")
     if extra_env:
         env.update(extra_env)
     return subprocess.Popen(
@@ -196,9 +194,7 @@ async def webhook_proc():
         extra_env={"A2A_E2E_WEBHOOK_LOG": WEBHOOK_LOG_PATH},
     )
     try:
-        await wait_for_url(
-            f"http://127.0.0.1:{WEBHOOK_PORT}/health", timeout=15.0
-        )
+        await wait_for_url(f"http://127.0.0.1:{WEBHOOK_PORT}/health", timeout=15.0)
         yield proc
     finally:
         _terminate(proc)
@@ -219,9 +215,7 @@ async def server_proc(webhook_proc, e2e_redis):
         ],
     )
     try:
-        await wait_for_url(
-            f"{BASE_URL}/.well-known/agent-card.json", timeout=20.0
-        )
+        await wait_for_url(f"{BASE_URL}/.well-known/agent-card.json", timeout=20.0)
         yield proc
     finally:
         _terminate(proc)
@@ -249,9 +243,7 @@ class TestEndToEnd:
     """Full subprocess + Redis assertions across the example surface."""
 
     @pytest.mark.asyncio(loop_scope="module")
-    async def test_send_message_round_trip(
-        self, server_proc, fresh_state, e2e_redis
-    ):
+    async def test_send_message_round_trip(self, server_proc, fresh_state, e2e_redis):
         from examples.e2e.client import scenario_send_and_get
 
         task_id = await scenario_send_and_get(BASE_URL, user_name="alice")
@@ -292,9 +284,7 @@ class TestEndToEnd:
         # ---- Owner-scoped sorted-set index ----
         index_key = "e2e:task:idx:alice"
         members = await e2e_redis.zrange(index_key, 0, -1)
-        assert len(members) == 1, (
-            f"Expected exactly one index member, got {members}"
-        )
+        assert len(members) == 1, f"Expected exactly one index member, got {members}"
         member = members[0]
         if isinstance(member, bytes):
             member = member.decode()
@@ -311,9 +301,7 @@ class TestEndToEnd:
         assert score_raw is not None, (
             f"Expected score entry for {task_id} in {score_key}"
         )
-        score = float(
-            score_raw.decode() if isinstance(score_raw, bytes) else score_raw
-        )
+        score = float(score_raw.decode() if isinstance(score_raw, bytes) else score_raw)
         assert score < 0, f"Index score should be negative, got {score}"
 
     @pytest.mark.asyncio(loop_scope="module")
@@ -434,7 +422,10 @@ class TestEndToEnd:
             r = await http.get(f"http://127.0.0.1:{WEBHOOK_PORT}/reset")
             assert r.status_code == 200
 
-        task_id_from_scenario, expected_configs = await scenario_push_multi_owner_dispatch(
+        (
+            task_id_from_scenario,
+            expected_configs,
+        ) = await scenario_push_multi_owner_dispatch(
             BASE_URL, WEBHOOK_URL, redis_url=REDIS_URL
         )
         assert expected_configs == 2
@@ -450,8 +441,7 @@ class TestEndToEnd:
 
         dispatch_members_raw = await e2e_redis.smembers(dispatch_keys[0])
         dispatch_members = {
-            (m.decode() if isinstance(m, bytes) else m)
-            for m in dispatch_members_raw
+            (m.decode() if isinstance(m, bytes) else m) for m in dispatch_members_raw
         }
         assert len(dispatch_members) == 2, (
             f"Expected 2 members in dispatch set, got {dispatch_members}"
@@ -476,19 +466,17 @@ class TestEndToEnd:
         # COMPLETED status to fan out (the scripted executor sleeps between
         # status transitions so external observers can wire push configs).
         import json as _json
+
         deadline = time.monotonic() + 15.0
         deliveries: list[dict] = []
         async with httpx.AsyncClient(timeout=2.0) as http:
             while time.monotonic() < deadline:
-                r = await http.get(
-                    f"http://127.0.0.1:{WEBHOOK_PORT}/deliveries"
-                )
+                r = await http.get(f"http://127.0.0.1:{WEBHOOK_PORT}/deliveries")
                 if r.status_code == 200:
                     deliveries = r.json()
                     blob_all = _json.dumps(deliveries, default=str)
-                    if (
-                        len(deliveries) >= 2
-                        and ("COMPLETED" in blob_all or "completed" in blob_all)
+                    if len(deliveries) >= 2 and (
+                        "COMPLETED" in blob_all or "completed" in blob_all
                     ):
                         break
                 await asyncio.sleep(0.2)
@@ -567,9 +555,7 @@ class TestEndToEnd:
                     key,
                 ],
             )
-            await wait_for_url(
-                f"{enc_base}/.well-known/agent-card.json", timeout=20.0
-            )
+            await wait_for_url(f"{enc_base}/.well-known/agent-card.json", timeout=20.0)
 
             # Reset webhook log for a clean baseline.
             async with httpx.AsyncClient(timeout=2.0) as http:
@@ -623,8 +609,7 @@ class TestEndToEnd:
                             break
                     await asyncio.sleep(0.2)
             assert len(deliveries) >= 2, (
-                f"Expected >=2 deliveries from encrypted run, got "
-                f"{len(deliveries)}"
+                f"Expected >=2 deliveries from encrypted run, got {len(deliveries)}"
             )
         finally:
             if server_proc is not None:

@@ -137,7 +137,7 @@ def _decode(value: Any) -> Any:
 
 def _suffix_after_prefix(key: str, prefix: str) -> str:
     if key.startswith(prefix):
-        return key[len(prefix):]
+        return key[len(prefix) :]
     return key
 
 
@@ -333,7 +333,7 @@ async def _migrate_task_hash(
 
     logger.info("task(hash): %d candidate key(s)", len(candidates))
     for i in range(0, len(candidates), batch_size):
-        batch = candidates[i: i + batch_size]
+        batch = candidates[i : i + batch_size]
         await _process_task_hash_batch(
             client,
             batch,
@@ -445,7 +445,7 @@ async def _migrate_task_json(
 
     logger.info("task-json: %d candidate key(s)", len(candidates))
     for i in range(0, len(candidates), batch_size):
-        batch = candidates[i: i + batch_size]
+        batch = candidates[i : i + batch_size]
         await _process_task_json_batch(
             client,
             batch,
@@ -510,9 +510,7 @@ async def _process_task_json_batch(
 
         new_score = -micros
         new_member = _index_member(micros, task.id)
-        write_pipe.execute_command(
-            "JSON.SET", new_key, "$", json.dumps(new_task_dict)
-        )
+        write_pipe.execute_command("JSON.SET", new_key, "$", json.dumps(new_task_dict))
         write_pipe.zadd(index_key, {new_member: new_score})
         write_pipe.hset(score_key, task.id, str(new_score))
         write_pipe.execute_command("JSON.DEL", old_key)
@@ -552,7 +550,7 @@ async def _migrate_push_config(
 
     logger.info("push-config: %d candidate key(s)", len(candidates))
     for i in range(0, len(candidates), batch_size):
-        batch = candidates[i: i + batch_size]
+        batch = candidates[i : i + batch_size]
         await _process_push_config_batch(
             client,
             batch,
@@ -621,9 +619,7 @@ async def _process_push_config_batch(
             dispatch_key = f"{prefix}dispatch:{task_id}"
 
             if dry_run:
-                logger.info(
-                    "DRY push-config %s#%s -> %s", old_key, cid, new_config_key
-                )
+                logger.info("DRY push-config %s#%s -> %s", old_key, cid, new_config_key)
                 any_written = True
                 continue
 
@@ -786,8 +782,7 @@ def _parse_targets(raw: str) -> Set[str]:
     invalid = parts - VALID_TARGETS
     if invalid:
         raise argparse.ArgumentTypeError(
-            f"Unknown target(s): {sorted(invalid)}. "
-            f"Valid: {sorted(VALID_TARGETS)}"
+            f"Unknown target(s): {sorted(invalid)}. Valid: {sorted(VALID_TARGETS)}"
         )
     return parts
 

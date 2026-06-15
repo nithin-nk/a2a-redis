@@ -270,9 +270,7 @@ class TestTaskStoreListContract:
         # Expected newest-first order: 6, 5, 4, 3, 2, 1, 0.
         expected_order = [f"task_{i}" for i in reversed(range(7))]
 
-        page1 = await task_store.list(
-            ListTasksRequest(page_size=3), TEST_CONTEXT
-        )
+        page1 = await task_store.list(ListTasksRequest(page_size=3), TEST_CONTEXT)
         assert [t.id for t in page1.tasks] == expected_order[0:3]
         assert page1.total_size == 7
         assert page1.page_size == 3
@@ -311,9 +309,7 @@ class TestTaskStoreListContract:
             TEST_CONTEXT,
         )
 
-        resp = await task_store.list(
-            ListTasksRequest(context_id="ctx_A"), TEST_CONTEXT
-        )
+        resp = await task_store.list(ListTasksRequest(context_id="ctx_A"), TEST_CONTEXT)
         ids = sorted(t.id for t in resp.tasks)
         assert ids == ["x1", "x3"]
         # total_size reports the underlying index size (all 3) — page is filtered.
@@ -368,15 +364,9 @@ class TestTaskStoreListContract:
         t2_dt = self._ts(20)
         t3_dt = self._ts(30)
 
-        await task_store.save(
-            _build_task(task_id="ts1", timestamp=t1_dt), TEST_CONTEXT
-        )
-        await task_store.save(
-            _build_task(task_id="ts2", timestamp=t2_dt), TEST_CONTEXT
-        )
-        await task_store.save(
-            _build_task(task_id="ts3", timestamp=t3_dt), TEST_CONTEXT
-        )
+        await task_store.save(_build_task(task_id="ts1", timestamp=t1_dt), TEST_CONTEXT)
+        await task_store.save(_build_task(task_id="ts2", timestamp=t2_dt), TEST_CONTEXT)
+        await task_store.save(_build_task(task_id="ts3", timestamp=t3_dt), TEST_CONTEXT)
 
         # Lower bound strictly above T1 -> only T2 and T3 should appear.
         bound = Timestamp()
@@ -403,9 +393,7 @@ class TestTaskStoreListContract:
         )
 
         resp_self = await task_store.list(ListTasksRequest(), TEST_CONTEXT)
-        resp_other = await task_store.list(
-            ListTasksRequest(), TEST_CONTEXT_OTHER
-        )
+        resp_other = await task_store.list(ListTasksRequest(), TEST_CONTEXT_OTHER)
 
         assert [t.id for t in resp_self.tasks] == ["own_a"]
         assert resp_self.total_size == 1

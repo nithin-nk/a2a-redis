@@ -41,8 +41,12 @@ class TestRedisPushNotificationConfigStore:
         store = RedisPushNotificationConfigStore(redis_client, prefix="multi:")
         task_id = "task-multi"
 
-        await store.set_info(task_id, make_push_config("c1", "https://h1"), TEST_CONTEXT)
-        await store.set_info(task_id, make_push_config("c2", "https://h2"), TEST_CONTEXT)
+        await store.set_info(
+            task_id, make_push_config("c1", "https://h1"), TEST_CONTEXT
+        )
+        await store.set_info(
+            task_id, make_push_config("c2", "https://h2"), TEST_CONTEXT
+        )
 
         configs = await store.get_info(task_id, TEST_CONTEXT)
         ids = sorted(c.id for c in configs)
@@ -64,8 +68,12 @@ class TestRedisPushNotificationConfigStore:
         store = RedisPushNotificationConfigStore(redis_client, prefix="delone:")
         task_id = "task-delone"
 
-        await store.set_info(task_id, make_push_config("c1", "https://h1"), TEST_CONTEXT)
-        await store.set_info(task_id, make_push_config("c2", "https://h2"), TEST_CONTEXT)
+        await store.set_info(
+            task_id, make_push_config("c1", "https://h1"), TEST_CONTEXT
+        )
+        await store.set_info(
+            task_id, make_push_config("c2", "https://h2"), TEST_CONTEXT
+        )
 
         await store.delete_info(task_id, TEST_CONTEXT, config_id="c1")
 
@@ -137,9 +145,7 @@ class TestRedisPushNotificationConfigStore:
         await store.set_info(task_id, cfg, TEST_CONTEXT)
 
         # Raw bytes in Redis must NOT contain the plaintext payload.
-        raw_key = store._config_key(
-            store.owner_resolver(TEST_CONTEXT), task_id, "c1"
-        )
+        raw_key = store._config_key(store.owner_resolver(TEST_CONTEXT), task_id, "c1")
         raw = await redis_client.get(raw_key)
         assert raw is not None
         assert b"https://hook.example/secret" not in raw
@@ -161,13 +167,9 @@ class TestRedisPushNotificationConfigStore:
             redis_client, prefix="tamp:", encryption_key=key
         )
         task_id = "task-tamp"
-        await store.set_info(
-            task_id, make_push_config("c1", "https://h"), TEST_CONTEXT
-        )
+        await store.set_info(task_id, make_push_config("c1", "https://h"), TEST_CONTEXT)
 
-        raw_key = store._config_key(
-            store.owner_resolver(TEST_CONTEXT), task_id, "c1"
-        )
+        raw_key = store._config_key(store.owner_resolver(TEST_CONTEXT), task_id, "c1")
         # Overwrite with garbage so Fernet decrypt fails.
         await redis_client.set(raw_key, b"not-a-valid-fernet-token")
 
@@ -182,9 +184,7 @@ class TestRedisPushNotificationConfigStore:
         InvalidToken = fernet_mod.InvalidToken
 
         # First, write plaintext via an unencrypted store.
-        plain_store = RedisPushNotificationConfigStore(
-            redis_client, prefix="mix:"
-        )
+        plain_store = RedisPushNotificationConfigStore(redis_client, prefix="mix:")
         task_id = "task-mix"
         await plain_store.set_info(
             task_id, make_push_config("c1", "https://h"), TEST_CONTEXT

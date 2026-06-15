@@ -38,11 +38,11 @@ from starlette.routing import Route
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_LOG_PATH = '/tmp/a2a-e2e-webhook.log'
+DEFAULT_LOG_PATH = "/tmp/a2a-e2e-webhook.log"
 
 
 def _log_path() -> str:
-    return os.environ.get('A2A_E2E_WEBHOOK_LOG', DEFAULT_LOG_PATH)
+    return os.environ.get("A2A_E2E_WEBHOOK_LOG", DEFAULT_LOG_PATH)
 
 
 def _read_deliveries() -> list[dict[str, Any]]:
@@ -50,7 +50,7 @@ def _read_deliveries() -> list[dict[str, Any]]:
     if not os.path.exists(path):
         return []
     out: list[dict[str, Any]] = []
-    with open(path, 'r', encoding='utf-8') as fh:
+    with open(path, "r", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
             if not line:
@@ -72,24 +72,23 @@ def build_app() -> Starlette:
         try:
             body = await request.json()
         except Exception:
-            raw = (await request.body()).decode('utf-8', errors='replace')
-            body = {'_raw': raw}
+            raw = (await request.body()).decode("utf-8", errors="replace")
+            body = {"_raw": raw}
 
         record = {
-            'received_at': time.time(),
-            'headers': dict(request.headers),
-            'body': body,
+            "received_at": time.time(),
+            "headers": dict(request.headers),
+            "body": body,
         }
         path = _log_path()
-        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
         line = json.dumps(record, default=str)
         async with write_lock:
-            with open(path, 'a', encoding='utf-8') as fh:
-                fh.write(line + '\n')
-        print(f'[webhook] received delivery -> {path}', file=sys.stderr,
-              flush=True)
-        return JSONResponse({'status': 'received'})
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        print(f"[webhook] received delivery -> {path}", file=sys.stderr, flush=True)
+        return JSONResponse({"status": "received"})
 
     async def deliveries(_request: Request) -> JSONResponse:
         return JSONResponse(_read_deliveries())
@@ -99,25 +98,25 @@ def build_app() -> Starlette:
         async with write_lock:
             if os.path.exists(path):
                 os.remove(path)
-        print(f'[webhook] reset log {path}', file=sys.stderr, flush=True)
-        return JSONResponse({'status': 'reset'})
+        print(f"[webhook] reset log {path}", file=sys.stderr, flush=True)
+        return JSONResponse({"status": "reset"})
 
     async def health(_request: Request) -> JSONResponse:
-        return JSONResponse({'status': 'ok'})
+        return JSONResponse({"status": "ok"})
 
     return Starlette(
         routes=[
-            Route('/webhook', webhook, methods=['POST']),
-            Route('/deliveries', deliveries, methods=['GET']),
-            Route('/reset', reset, methods=['GET']),
-            Route('/health', health, methods=['GET']),
+            Route("/webhook", webhook, methods=["POST"]),
+            Route("/deliveries", deliveries, methods=["GET"]),
+            Route("/reset", reset, methods=["GET"]),
+            Route("/health", health, methods=["GET"]),
         ]
     )
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='a2a-redis e2e webhook')
-    parser.add_argument('--port', type=int, default=18001)
+    parser = argparse.ArgumentParser(description="a2a-redis e2e webhook")
+    parser.add_argument("--port", type=int, default=18001)
     return parser.parse_args(argv)
 
 
@@ -125,13 +124,13 @@ async def _run(args: argparse.Namespace) -> None:
     app = build_app()
     config = uvicorn.Config(
         app,
-        host='127.0.0.1',
+        host="127.0.0.1",
         port=args.port,
-        log_level='info',
+        log_level="info",
     )
     server = uvicorn.Server(config)
     print(
-        f'READY webhook port={args.port} log={_log_path()}',
+        f"READY webhook port={args.port} log={_log_path()}",
         file=sys.stderr,
         flush=True,
     )
@@ -147,5 +146,5 @@ def main(argv: list[str] | None = None) -> None:
         pass
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

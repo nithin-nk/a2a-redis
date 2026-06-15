@@ -48,13 +48,11 @@ class ScriptedAgentExecutor(AgentExecutor):
     # AgentExecutor ABC
     # ------------------------------------------------------------------
 
-    async def execute(
-        self, context: RequestContext, event_queue: EventQueue
-    ) -> None:
+    async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         """Drive the task lifecycle based on the inbound text command."""
         message = context.message
-        task_id = context.task_id or ''
-        context_id = context.context_id or ''
+        task_id = context.task_id or ""
+        context_id = context.context_id or ""
         if not message or not task_id or not context_id:
             return
 
@@ -62,9 +60,9 @@ class ScriptedAgentExecutor(AgentExecutor):
         # "slow" mode lets clients race-free register push configs before the
         # terminal COMPLETED status fires: it inserts long enough sleeps to
         # cover any local config-registration round trip.
-        slow_step_s = 0.5 if command.startswith('slow:') else 0.01
-        if command.startswith('slow:'):
-            command = command[len('slow:'):]
+        slow_step_s = 0.5 if command.startswith("slow:") else 0.01
+        if command.startswith("slow:"):
+            command = command[len("slow:") :]
 
         updater = TaskUpdater(
             event_queue=event_queue,
@@ -90,16 +88,16 @@ class ScriptedAgentExecutor(AgentExecutor):
         await asyncio.sleep(slow_step_s)
         await updater.start_work()
 
-        if command == 'fail':
-            logger.info('ScriptedAgentExecutor: failing task %s', task_id)
+        if command == "fail":
+            logger.info("ScriptedAgentExecutor: failing task %s", task_id)
             await updater.failed()
             return
 
-        if command == 'wait':
+        if command == "wait":
             event = asyncio.Event()
             self._wait_events[task_id] = event
             logger.info(
-                'ScriptedAgentExecutor: task %s waiting for cancel',
+                "ScriptedAgentExecutor: task %s waiting for cancel",
                 task_id,
             )
             try:
@@ -111,10 +109,10 @@ class ScriptedAgentExecutor(AgentExecutor):
             return
 
         # Default echo flow: emit the deterministic artifact, then complete.
-        result_text = f'{command.upper()} (processed)'
+        result_text = f"{command.upper()} (processed)"
         await updater.add_artifact(
             parts=[Part(text=result_text)],
-            name='result',
+            name="result",
             last_chunk=True,
         )
         # Brief pause so external observers (push-config registrars in the
@@ -123,12 +121,10 @@ class ScriptedAgentExecutor(AgentExecutor):
         await asyncio.sleep(slow_step_s)
         await updater.complete()
 
-    async def cancel(
-        self, context: RequestContext, event_queue: EventQueue
-    ) -> None:
+    async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         """Unblock any waiting execute() and emit a CANCELED status."""
-        task_id = context.task_id or ''
-        context_id = context.context_id or ''
+        task_id = context.task_id or ""
+        context_id = context.context_id or ""
 
         # Resolve the wait barrier first so the still-running execute()
         # finishes promptly. cancel() takes responsibility for emitting the

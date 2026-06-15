@@ -32,8 +32,8 @@ class SampleUser(User):
         return self._user_name
 
 
-TEST_CONTEXT = ServerCallContext(user=SampleUser('test_user'))
-TEST_CONTEXT_OTHER = ServerCallContext(user=SampleUser('other_user'))
+TEST_CONTEXT = ServerCallContext(user=SampleUser("test_user"))
+TEST_CONTEXT_OTHER = ServerCallContext(user=SampleUser("other_user"))
 
 
 @pytest.fixture

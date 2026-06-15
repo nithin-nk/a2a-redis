@@ -139,9 +139,7 @@ class RedisStreamsEventQueue(EventQueueLegacy):
                 "event_data": deserialize_from_json(fields[b"event_data"]),
             }
 
-            await self.redis.xack(
-                self._stream_key, self.consumer_group, message_id
-            )  # type: ignore[misc]
+            await self.redis.xack(self._stream_key, self.consumer_group, message_id)  # type: ignore[misc]
 
             return deserialize_event(event_structure)
 

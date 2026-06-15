@@ -255,9 +255,7 @@ class TestRedisStreamsEventQueue:
         "event_type_name",
         ["Message", "Task", "TaskStatusUpdateEvent", "TaskArtifactUpdateEvent"],
     )
-    async def test_enqueue_roundtrip_per_event_type(
-        self, mock_redis, event_type_name
-    ):
+    async def test_enqueue_roundtrip_per_event_type(self, mock_redis, event_type_name):
         """Each v1.1 Event union member serializes through XADD with the right tag."""
         import json
 

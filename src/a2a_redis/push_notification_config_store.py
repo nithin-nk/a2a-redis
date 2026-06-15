@@ -38,7 +38,7 @@ class RedisPushNotificationConfigStore(PushNotificationConfigStore):
             consulting context.
     """
 
-    _fernet: 'Fernet | None'
+    _fernet: "Fernet | None"
 
     def __init__(
         self,
@@ -74,11 +74,9 @@ class RedisPushNotificationConfigStore(PushNotificationConfigStore):
                 ) from e
 
             if isinstance(encryption_key, str):
-                encryption_key = encryption_key.encode('utf-8')
+                encryption_key = encryption_key.encode("utf-8")
             self._fernet = Fernet(encryption_key)
-            logger.debug(
-                'Encryption enabled for Redis push notification config store.'
-            )
+            logger.debug("Encryption enabled for Redis push notification config store.")
 
     # ---- key helpers ----
 
@@ -94,7 +92,7 @@ class RedisPushNotificationConfigStore(PushNotificationConfigStore):
     # ---- serialization ----
 
     def _serialize(self, config: TaskPushNotificationConfig) -> bytes:
-        json_payload = MessageToJson(config).encode('utf-8')
+        json_payload = MessageToJson(config).encode("utf-8")
         if self._fernet is not None:
             return self._fernet.encrypt(json_payload)
         return json_payload
@@ -105,9 +103,9 @@ class RedisPushNotificationConfigStore(PushNotificationConfigStore):
             # tampered/wrong-key ciphertext should be a hard error, not a
             # silent skip.
             decrypted = self._fernet.decrypt(payload)
-            return Parse(decrypted.decode('utf-8'), TaskPushNotificationConfig())
+            return Parse(decrypted.decode("utf-8"), TaskPushNotificationConfig())
 
-        payload_str = payload.decode('utf-8') if isinstance(payload, bytes) else payload
+        payload_str = payload.decode("utf-8") if isinstance(payload, bytes) else payload
         return Parse(payload_str, TaskPushNotificationConfig())
 
     # ---- ABC implementation ----
@@ -136,7 +134,7 @@ class RedisPushNotificationConfigStore(PushNotificationConfigStore):
         await pipe.execute()
 
         logger.debug(
-            'Push notification config for task %s with config id %s for owner %s saved/updated.',
+            "Push notification config for task %s with config id %s for owner %s saved/updated.",
             task_id,
             config_id,
             owner,
@@ -154,7 +152,7 @@ class RedisPushNotificationConfigStore(PushNotificationConfigStore):
             return []
 
         config_ids = sorted(
-            m.decode('utf-8') if isinstance(m, bytes) else m for m in members
+            m.decode("utf-8") if isinstance(m, bytes) else m for m in members
         )
         keys = [self._config_key(owner, task_id, cid) for cid in config_ids]
         values = await self.redis.mget(keys)
@@ -168,7 +166,7 @@ class RedisPushNotificationConfigStore(PushNotificationConfigStore):
                 configs.append(self._deserialize(value))
             except Exception:
                 logger.exception(
-                    'Could not deserialize push notification config for task %s, config %s, owner %s',
+                    "Could not deserialize push notification config for task %s, config %s, owner %s",
                     task_id,
                     cid,
                     owner,
@@ -191,8 +189,8 @@ class RedisPushNotificationConfigStore(PushNotificationConfigStore):
 
         decoded: list[tuple[str, str]] = []
         for m in members:
-            s = m.decode('utf-8') if isinstance(m, bytes) else m
-            owner, _, config_id = s.partition(':')
+            s = m.decode("utf-8") if isinstance(m, bytes) else m
+            owner, _, config_id = s.partition(":")
             if not config_id:
                 # Malformed entry, skip.
                 continue
@@ -210,7 +208,7 @@ class RedisPushNotificationConfigStore(PushNotificationConfigStore):
                 configs.append(self._deserialize(value))
             except Exception:
                 logger.exception(
-                    'Could not deserialize push notification config for task %s, config %s, owner %s',
+                    "Could not deserialize push notification config for task %s, config %s, owner %s",
                     task_id,
                     cid,
                     owner,
@@ -237,7 +235,7 @@ class RedisPushNotificationConfigStore(PushNotificationConfigStore):
             is_member = await self.redis.sismember(taskconfigs_key, config_id)
             if not is_member:
                 logger.warning(
-                    'Attempted to delete push notification config for task %s, owner %s with config_id: %s that does not exist.',
+                    "Attempted to delete push notification config for task %s, owner %s with config_id: %s that does not exist.",
                     task_id,
                     owner,
                     config_id,
@@ -250,7 +248,7 @@ class RedisPushNotificationConfigStore(PushNotificationConfigStore):
             pipe.srem(dispatch_key, f"{owner}:{config_id}")
             await pipe.execute()
             logger.info(
-                'Deleted push notification config %s for task %s, owner %s.',
+                "Deleted push notification config %s for task %s, owner %s.",
                 config_id,
                 task_id,
                 owner,
@@ -260,15 +258,13 @@ class RedisPushNotificationConfigStore(PushNotificationConfigStore):
         members = await self.redis.smembers(taskconfigs_key)
         if not members:
             logger.warning(
-                'Attempted to delete push notification config for task %s, owner %s that does not exist.',
+                "Attempted to delete push notification config for task %s, owner %s that does not exist.",
                 task_id,
                 owner,
             )
             return
 
-        config_ids = [
-            m.decode('utf-8') if isinstance(m, bytes) else m for m in members
-        ]
+        config_ids = [m.decode("utf-8") if isinstance(m, bytes) else m for m in members]
         pipe = self.redis.pipeline()
         for cid in config_ids:
             pipe.delete(self._config_key(owner, task_id, cid))
@@ -276,7 +272,7 @@ class RedisPushNotificationConfigStore(PushNotificationConfigStore):
         pipe.delete(taskconfigs_key)
         await pipe.execute()
         logger.info(
-            'Deleted all push notification configs for task %s, owner %s.',
+            "Deleted all push notification configs for task %s, owner %s.",
             task_id,
             owner,
         )

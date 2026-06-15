@@ -79,8 +79,15 @@ class _RedisTaskStoreBase(TaskStore):
 
     # ---------------- Payload hooks (subclass override) ----------------
 
-    def _write_payload(self, pipe: Any, task_key: str, task_dict: Dict[str, Any],
-                       owner: str, task: Task, last_updated: str) -> None:
+    def _write_payload(
+        self,
+        pipe: Any,
+        task_key: str,
+        task_dict: Dict[str, Any],
+        owner: str,
+        task: Task,
+        last_updated: str,
+    ) -> None:
         """Stage payload write on the given pipeline. Subclasses override."""
         raise NotImplementedError
 
@@ -92,8 +99,9 @@ class _RedisTaskStoreBase(TaskStore):
         """Stage payload deletion on the given pipeline."""
         raise NotImplementedError
 
-    async def _fetch_payloads(self, owner: str,
-                              task_ids: List[str]) -> List[Optional[Dict[str, Any]]]:
+    async def _fetch_payloads(
+        self, owner: str, task_ids: List[str]
+    ) -> List[Optional[Dict[str, Any]]]:
         """Fetch many task payloads as dicts. Subclasses may optimize."""
         results: List[Optional[Dict[str, Any]]] = []
         for tid in task_ids:
@@ -139,9 +147,7 @@ class _RedisTaskStoreBase(TaskStore):
         self._write_payload(pipe, task_key, task_dict, owner, task, last_updated)
         await pipe.execute()
 
-    async def get(
-        self, task_id: str, context: ServerCallContext
-    ) -> Optional[Task]:
+    async def get(self, task_id: str, context: ServerCallContext) -> Optional[Task]:
         """Retrieve a task for the resolved owner, or None if absent."""
         owner = self._owner_resolver(context)
         task_dict = await self._read_payload(self._task_key(owner, task_id))
@@ -200,9 +206,7 @@ class _RedisTaskStoreBase(TaskStore):
             raw = base64.b64decode(encoded.encode("utf-8")).decode("utf-8")
             data = json.loads(raw)
         except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
-            raise InvalidParamsError(
-                f"Invalid page token: {token}"
-            ) from exc
+            raise InvalidParamsError(f"Invalid page token: {token}") from exc
         if not isinstance(data, dict):
             raise InvalidParamsError(f"Invalid page token: {token}")
         offset = data.get("offset")
@@ -251,9 +255,7 @@ class _RedisTaskStoreBase(TaskStore):
             if task.status.state != params.status:
                 return False
         if params.HasField("status_timestamp_after"):
-            if not (
-                task.HasField("status") and task.status.HasField("timestamp")
-            ):
+            if not (task.HasField("status") and task.status.HasField("timestamp")):
                 return False
             lhs = task.status.timestamp.ToJsonString()
             rhs = params.status_timestamp_after.ToJsonString()
@@ -334,11 +336,7 @@ class _RedisTaskStoreBase(TaskStore):
         # Trim and decide whether a next page exists.
         tasks_page = collected[:page_size]
         next_page_token: Optional[str] = None
-        if (
-            len(tasks_page) == page_size
-            and not exhausted
-            and next_cursor < total_size
-        ):
+        if len(tasks_page) == page_size and not exhausted and next_cursor < total_size:
             next_page_token = self._encode_page_token(next_cursor, owner)
 
         return ListTasksResponse(
@@ -352,8 +350,15 @@ class _RedisTaskStoreBase(TaskStore):
 class RedisTaskStore(_RedisTaskStoreBase):
     """Redis hash-backed TaskStore with owner-scoped keys (v1.1 contract)."""
 
-    def _write_payload(self, pipe: Any, task_key: str, task_dict: Dict[str, Any],
-                       owner: str, task: Task, last_updated: str) -> None:
+    def _write_payload(
+        self,
+        pipe: Any,
+        task_key: str,
+        task_dict: Dict[str, Any],
+        owner: str,
+        task: Task,
+        last_updated: str,
+    ) -> None:
         """Stage HSET of the task hash, including metadata columns."""
         mapping: Dict[str, str] = {
             "task_payload": json.dumps(task_dict),
@@ -383,8 +388,9 @@ class RedisTaskStore(_RedisTaskStoreBase):
         """Stage DEL of the hash key."""
         pipe.delete(task_key)
 
-    async def _fetch_payloads(self, owner: str,
-                              task_ids: List[str]) -> List[Optional[Dict[str, Any]]]:
+    async def _fetch_payloads(
+        self, owner: str, task_ids: List[str]
+    ) -> List[Optional[Dict[str, Any]]]:
         """Pipeline HGET of each task_payload field, in order."""
         pipe = self.redis.pipeline(transaction=False)
         for tid in task_ids:
@@ -414,8 +420,15 @@ class RedisJSONTaskStore(_RedisTaskStoreBase):
     plain Redis structures, identical to :class:`RedisTaskStore`.
     """
 
-    def _write_payload(self, pipe: Any, task_key: str, task_dict: Dict[str, Any],
-                       owner: str, task: Task, last_updated: str) -> None:
+    def _write_payload(
+        self,
+        pipe: Any,
+        task_key: str,
+        task_dict: Dict[str, Any],
+        owner: str,
+        task: Task,
+        last_updated: str,
+    ) -> None:
         """Stage a JSON.SET of the task document at root ``$``.
 
         Uses ``execute_command`` directly to avoid relying on the JSON helper
@@ -468,15 +481,14 @@ class RedisJSONTaskStore(_RedisTaskStoreBase):
         """
         pipe.execute_command("JSON.DEL", task_key)
 
-    async def _fetch_payloads(self, owner: str,
-                              task_ids: List[str]) -> List[Optional[Dict[str, Any]]]:
+    async def _fetch_payloads(
+        self, owner: str, task_ids: List[str]
+    ) -> List[Optional[Dict[str, Any]]]:
         """Pipeline JSON.GET of each task document, in order."""
         try:
             pipe = self.redis.pipeline(transaction=False)
             for tid in task_ids:
-                pipe.execute_command(
-                    "JSON.GET", self._task_key(owner, tid)
-                )
+                pipe.execute_command("JSON.GET", self._task_key(owner, tid))
             raw_values = await pipe.execute()
         except Exception:
             # Fall back to sequential reads if pipelining JSON ops fails.

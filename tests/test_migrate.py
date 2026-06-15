@@ -11,7 +11,7 @@ from a2a_redis.migrate import MigrationReport, main, migrate
 from a2a_redis.push_notification_config_store import RedisPushNotificationConfigStore
 from a2a_redis.task_store import RedisJSONTaskStore, RedisTaskStore
 
-from tests.conftest import SampleUser, TEST_CONTEXT
+from tests.conftest import SampleUser
 
 
 pytestmark = pytest.mark.asyncio
@@ -44,9 +44,13 @@ async def _redis_json_available(redis_client) -> bool:
 # v0.2 hash-store layout: each Task field is stored as its own hash field.
 # Nested dicts/lists go through json.dumps; TaskStatus was wrapped in
 # {"_type": "a2a.types.TaskStatus", "_data": {...}}.
-def _seed_v02_task_hash(redis_client, prefix: str, task_id: str,
-                       context_id: str = "ctx-1",
-                       state: str = "submitted"):
+def _seed_v02_task_hash(
+    redis_client,
+    prefix: str,
+    task_id: str,
+    context_id: str = "ctx-1",
+    state: str = "submitted",
+):
     return redis_client.hset(
         f"{prefix}{task_id}",
         mapping={
@@ -62,9 +66,13 @@ def _seed_v02_task_hash(redis_client, prefix: str, task_id: str,
     )
 
 
-def _seed_v02_task_json(redis_client, prefix: str, task_id: str,
-                       context_id: str = "ctx-j",
-                       state: str = "working"):
+def _seed_v02_task_json(
+    redis_client,
+    prefix: str,
+    task_id: str,
+    context_id: str = "ctx-j",
+    state: str = "working",
+):
     payload = {
         "id": task_id,
         "context_id": context_id,
@@ -75,8 +83,7 @@ def _seed_v02_task_json(redis_client, prefix: str, task_id: str,
     )
 
 
-def _seed_v02_push_config_hash(redis_client, prefix: str, task_id: str,
-                              configs: dict):
+def _seed_v02_push_config_hash(redis_client, prefix: str, task_id: str, configs: dict):
     """Each config_id -> JSON-encoded config dict (no "id" field — the field
     name IS the id)."""
     mapping = {cid: json.dumps(data) for cid, data in configs.items()}
@@ -113,6 +120,7 @@ class TestMigrate:
         assert task.context_id == "ctx-1"
         # Status state was decoded from the v0.2 enum string.
         from a2a.types.a2a_pb2 import TASK_STATE_WORKING
+
         assert task.status.state == TASK_STATE_WORKING
 
     async def test_migrate_dry_run_writes_nothing(self, redis_client):
@@ -177,9 +185,7 @@ class TestMigrate:
         await redis_client.hset(
             f"{prefix}legacy:newkey",
             mapping={
-                "task_payload": json.dumps(
-                    {"id": "newkey", "context_id": "ctx-new"}
-                ),
+                "task_payload": json.dumps({"id": "newkey", "context_id": "ctx-new"}),
                 "owner": "legacy",
                 "context_id": "ctx-new",
                 "last_updated": "",
@@ -268,6 +274,7 @@ class TestMigrate:
         assert task.id == "tj1"
         assert task.context_id == "ctx-j"
         from a2a.types.a2a_pb2 import TASK_STATE_COMPLETED
+
         assert task.status.state == TASK_STATE_COMPLETED
 
     async def test_migrate_cli_main(self, redis_client, monkeypatch):
@@ -278,12 +285,18 @@ class TestMigrate:
 
         # The redis_client fixture is wired to db=15 on localhost.
         argv = [
-            "--redis-url", "redis://localhost:6379/15",
-            "--default-owner", "legacy",
-            "--task-prefix", prefix,
-            "--push-prefix", "mig_cli_push:",
-            "--targets", "task",
-            "--batch-size", "10",
+            "--redis-url",
+            "redis://localhost:6379/15",
+            "--default-owner",
+            "legacy",
+            "--task-prefix",
+            prefix,
+            "--push-prefix",
+            "mig_cli_push:",
+            "--targets",
+            "task",
+            "--batch-size",
+            "10",
         ]
         # main() calls asyncio.run() internally; hop to a thread so we don't
         # collide with the pytest-asyncio event loop.
@@ -296,7 +309,8 @@ class TestMigrate:
 
     async def test_migration_report_format(self):
         report = MigrationReport(
-            scanned=5, migrated=3,
+            scanned=5,
+            migrated=3,
             skipped=["k1 (bad)"],
             errors=["e1"],
             dry_run=True,
