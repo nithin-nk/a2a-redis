@@ -2,14 +2,19 @@
 
 import json
 import pytest
+import pytest_asyncio
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
 
 from google.protobuf.timestamp_pb2 import Timestamp
 
 from a2a_redis.task_store import RedisTaskStore, RedisJSONTaskStore
 
 from tests.conftest import TEST_CONTEXT, TEST_CONTEXT_OTHER
+
+
+# ---------------------------------------------------------------------------
+# Test helpers
+# ---------------------------------------------------------------------------
 
 
 def _build_task(
@@ -34,8 +39,62 @@ def _build_task(
     return task
 
 
-class TestRedisTaskStore:
-    """Unit-ish tests against the real Redis fixture for RedisTaskStore."""
+async def _redis_json_available(redis_client) -> bool:
+    """Return True iff the connected Redis has the RedisJSON module loaded."""
+    try:
+        modules = await redis_client.execute_command("MODULE", "LIST")
+    except Exception:
+        return False
+    for entry in modules or []:
+        # MODULE LIST returns a list of arrays; the second element is the name.
+        if isinstance(entry, (list, tuple)):
+            for i, item in enumerate(entry):
+                if isinstance(item, bytes):
+                    item = item.decode()
+                if isinstance(item, str) and item.lower() == "name":
+                    name = entry[i + 1] if i + 1 < len(entry) else None
+                    if isinstance(name, bytes):
+                        name = name.decode()
+                    if name and "json" in name.lower():
+                        return True
+        elif isinstance(entry, dict):
+            name = entry.get(b"name") or entry.get("name")
+            if isinstance(name, bytes):
+                name = name.decode()
+            if name and "json" in name.lower():
+                return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Parametrized store fixture: runs each behavioural test under both backends.
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture(params=["hash", "json"])
+async def task_store(request, redis_client):
+    """Yield a TaskStore wired against the shared redis_client.
+
+    Parametrized over both backends so contract-level tests run once per
+    implementation. Skips the ``json`` parameter when the connected Redis does
+    not have the RedisJSON module loaded.
+    """
+    backend = request.param
+    if backend == "json":
+        if not await _redis_json_available(redis_client):
+            pytest.skip("RedisJSON module not loaded")
+        yield RedisJSONTaskStore(redis_client, prefix="test_task:")
+        return
+    yield RedisTaskStore(redis_client, prefix="test_task:")
+
+
+# ---------------------------------------------------------------------------
+# Backend-specific tests (init / key layout). Not parametrized.
+# ---------------------------------------------------------------------------
+
+
+class TestRedisTaskStoreHashSpecifics:
+    """Hash-backend-only tests: init defaults and on-disk hash layout."""
 
     def test_init(self, redis_client):
         """Test RedisTaskStore initialization."""
@@ -47,6 +106,73 @@ class TestRedisTaskStore:
         """Test owner-scoped task key generation."""
         store = RedisTaskStore(redis_client, prefix="task:")
         assert store._task_key("alice", "123") == "task:alice:123"
+
+    @pytest.mark.asyncio
+    async def test_protocol_version_preserved(self, redis_client):
+        """protocol_version metadata is persisted on the stored hash."""
+        store = RedisTaskStore(redis_client, prefix="test_task:")
+        task = _build_task(task_id="pv_task")
+        await store.save(task, TEST_CONTEXT)
+
+        # TEST_CONTEXT user is 'test_user'
+        key = "test_task:test_user:pv_task"
+        stored = await redis_client.hgetall(key)
+        # Keys come back as bytes from real Redis (decode_responses=False).
+        assert stored.get(b"protocol_version") == b"1.0"
+        # task_payload should be valid JSON we can round-trip back to a Task.
+        payload = json.loads(stored[b"task_payload"].decode())
+        assert payload["id"] == "pv_task"
+
+
+class TestRedisJSONTaskStoreSpecifics:
+    """JSON-backend-only tests: init defaults and on-disk JSON layout."""
+
+    def test_init(self, redis_client):
+        """Test RedisJSONTaskStore initialization."""
+        store = RedisJSONTaskStore(redis_client, prefix="test:")
+        assert store.redis is redis_client
+        assert store.prefix == "test:"
+
+    def test_task_key_generation(self, redis_client):
+        """Test owner-scoped task key generation."""
+        store = RedisJSONTaskStore(redis_client, prefix="task:")
+        assert store._task_key("alice", "123") == "task:alice:123"
+
+    @pytest.mark.asyncio
+    async def test_payload_stored_as_json_document(self, redis_client):
+        """Task payload is stored as a native RedisJSON document at $."""
+        if not await _redis_json_available(redis_client):
+            pytest.skip("RedisJSON module not loaded")
+
+        store = RedisJSONTaskStore(redis_client, prefix="test_task:")
+        task = _build_task(task_id="jdoc_task")
+        await store.save(task, TEST_CONTEXT)
+
+        key = "test_task:test_user:jdoc_task"
+        # The key should report type "ReJSON-RL" (RedisJSON's stored type).
+        key_type = await redis_client.type(key)
+        if isinstance(key_type, bytes):
+            key_type = key_type.decode()
+        assert "json" in key_type.lower() or key_type == "ReJSON-RL"
+
+        # And the document should round-trip via JSON.GET.
+        raw = await redis_client.execute_command("JSON.GET", key)
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8")
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        if isinstance(raw, list):
+            raw = raw[0]
+        assert raw["id"] == "jdoc_task"
+
+
+# ---------------------------------------------------------------------------
+# Contract tests — run against both backends via the parametrized fixture.
+# ---------------------------------------------------------------------------
+
+
+class TestTaskStoreContract:
+    """Behavioural contract tests; run under both hash and json backends."""
 
     @pytest.mark.asyncio
     async def test_save_then_get_round_trip(self, task_store):
@@ -100,24 +226,9 @@ class TestRedisTaskStore:
         loaded = await task_store.get("never_saved", TEST_CONTEXT)
         assert loaded is None
 
-    @pytest.mark.asyncio
-    async def test_protocol_version_preserved(self, task_store, redis_client):
-        """protocol_version metadata is persisted on the stored hash."""
-        task = _build_task(task_id="pv_task")
-        await task_store.save(task, TEST_CONTEXT)
 
-        # task_store fixture uses prefix="test_task:" and TEST_CONTEXT user is 'test_user'
-        key = "test_task:test_user:pv_task"
-        stored = await redis_client.hgetall(key)
-        # Keys come back as bytes from real Redis (decode_responses=False).
-        assert stored.get(b"protocol_version") == b"1.0"
-        # task_payload should be valid JSON we can round-trip back to a Task.
-        payload = json.loads(stored[b"task_payload"].decode())
-        assert payload["id"] == "pv_task"
-
-
-class TestRedisTaskStoreList:
-    """Integration tests for RedisTaskStore.list() filters + pagination."""
+class TestTaskStoreListContract:
+    """Contract tests for ``list()`` filters + pagination, run under both backends."""
 
     @staticmethod
     def _ts(seconds: int) -> datetime:
@@ -338,216 +449,3 @@ class TestRedisTaskStoreList:
             ListTasksRequest(page_size=10_000), TEST_CONTEXT
         )
         assert resp_max.page_size == MAX_LIST_TASKS_PAGE_SIZE
-
-
-class TestRedisJSONTaskStore:
-    """Tests for RedisJSONTaskStore."""
-
-    def test_init(self, mock_redis):
-        """Test RedisJSONTaskStore initialization."""
-        store = RedisJSONTaskStore(mock_redis, prefix="json:")
-        assert store.redis == mock_redis
-        assert store.prefix == "json:"
-
-    @pytest.mark.asyncio
-    async def test_save_task(self, mock_redis, sample_task_data):
-        """Test task saving with JSON."""
-        from a2a.types import Task
-
-        # Create Task object from sample data
-        task = Task(**sample_task_data)
-
-        store = RedisJSONTaskStore(mock_redis)
-        await store.save(task)
-
-        mock_redis.json.assert_called_once()
-        # The save method serializes the task using model_dump()
-        expected_data = task.model_dump()
-        # Get the mock json object that was already set up in conftest
-        mock_json = mock_redis.json.return_value
-        mock_json.set.assert_called_once_with("task:task_123", "$", expected_data)
-
-    @pytest.mark.asyncio
-    async def test_save_task_with_context(self, mock_redis, sample_task_data):
-        """Test that save() accepts context parameter (SDK v0.3.x compatibility)."""
-        from a2a.types import Task
-        from a2a.server.context import ServerCallContext
-
-        task = Task(**sample_task_data)
-        context = MagicMock(spec=ServerCallContext)
-
-        store = RedisJSONTaskStore(mock_redis)
-        # This should not raise TypeError
-        await store.save(task, context)
-
-        mock_redis.json.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_get_task_with_context(self, mock_redis):
-        """Test that get() accepts context parameter (SDK v0.3.x compatibility)."""
-        from a2a.server.context import ServerCallContext
-
-        mock_json = mock_redis.json.return_value
-        mock_json.get.return_value = None
-        context = MagicMock(spec=ServerCallContext)
-
-        store = RedisJSONTaskStore(mock_redis)
-        # This should not raise TypeError
-        await store.get("task_123", context)
-
-        mock_json.get.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_delete_task_with_context(self, mock_redis):
-        """Test that delete() accepts context parameter (SDK v0.3.x compatibility)."""
-        from a2a.server.context import ServerCallContext
-
-        context = MagicMock(spec=ServerCallContext)
-
-        store = RedisJSONTaskStore(mock_redis)
-        # This should not raise TypeError
-        await store.delete("task_123", context)
-
-        mock_redis.delete.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_get_task_exists(self, mock_redis, sample_task_data):
-        """Test retrieving an existing task with JSON."""
-        from a2a.types import Task
-
-        # Get the mock json object that was already set up in conftest
-        mock_json = mock_redis.json.return_value
-        mock_json.get.return_value = sample_task_data
-
-        store = RedisJSONTaskStore(mock_redis)
-        result = await store.get("task_123")
-
-        assert isinstance(result, Task)
-        assert result.id == "task_123"
-        assert result.context_id == "context_456"
-        mock_json.get.assert_called_once_with("task:task_123")
-
-    @pytest.mark.asyncio
-    async def test_get_task_redis_error(self, mock_redis):
-        """Test retrieving task when Redis JSON operation fails."""
-        mock_json = MagicMock()
-        mock_json.get.side_effect = Exception("Redis error")
-        mock_redis.json.return_value = mock_json
-
-        store = RedisJSONTaskStore(mock_redis)
-        result = await store.get("task_123")
-
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_delete_task(self, mock_redis):
-        """Test task deletion with JSON."""
-        mock_redis.delete.return_value = 1
-
-        store = RedisJSONTaskStore(mock_redis)
-        await store.delete("task_123")
-        mock_redis.delete.assert_called_once_with("task:task_123")
-
-    @pytest.mark.asyncio
-    async def test_update_task_exists(self, mock_redis, sample_task_data):
-        """Test updating an existing task with JSON."""
-        # Get the mock json object that was already set up in conftest
-        mock_json = mock_redis.json.return_value
-        mock_json.get.return_value = sample_task_data
-
-        from a2a.types import TaskStatus, TaskState
-
-        store = RedisJSONTaskStore(mock_redis)
-        updates = {"status": TaskStatus(state=TaskState.completed)}
-        result = await store.update_task("task_123", updates)
-
-        assert result is True
-        # Should fetch, update, and save
-        mock_json.get.assert_called_once_with("task:task_123")
-        mock_json.set.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_update_task_not_exists(self, mock_redis):
-        """Test updating a non-existent task with JSON."""
-        # Get the mock json object that was already set up in conftest
-        mock_json = mock_redis.json.return_value
-        mock_json.get.return_value = None
-
-        store = RedisJSONTaskStore(mock_redis)
-        result = await store.update_task("nonexistent", {"status": "completed"})
-
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_list_task_ids(self, mock_redis):
-        """Test listing task IDs."""
-        mock_redis.keys.return_value = [b"task:123", b"task:456"]
-
-        store = RedisJSONTaskStore(mock_redis)
-        result = await store.list_task_ids()
-
-        assert result == ["123", "456"]
-        mock_redis.keys.assert_called_once_with("task:*")
-
-    @pytest.mark.asyncio
-    async def test_task_exists(self, mock_redis):
-        """Test checking if task exists."""
-        mock_redis.exists.return_value = True
-
-        store = RedisJSONTaskStore(mock_redis)
-        result = await store.task_exists("task_123")
-
-        assert result is True
-        mock_redis.exists.assert_called_once_with("task:task_123")
-
-    @pytest.mark.asyncio
-    async def test_get_task_returns_list(self, mock_redis, sample_task_data):
-        """Test retrieving task when JSON.GET returns a list (JSONPath result)."""
-        from a2a.types import Task
-
-        mock_json = mock_redis.json.return_value
-        # Simulate JSONPath returning a list
-        mock_json.get.return_value = [sample_task_data]
-
-        store = RedisJSONTaskStore(mock_redis)
-        result = await store.get("task_123")
-
-        assert isinstance(result, Task)
-        assert result.id == "task_123"
-
-    @pytest.mark.asyncio
-    async def test_get_task_returns_unexpected_type(self, mock_redis):
-        """Test retrieving task when JSON.GET returns unexpected type."""
-        mock_json = mock_redis.json.return_value
-        # Simulate JSONPath returning something unexpected (e.g., a string or number)
-        mock_json.get.return_value = "unexpected"
-
-        store = RedisJSONTaskStore(mock_redis)
-        result = await store.get("task_123")
-
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_get_task_returns_empty_list(self, mock_redis):
-        """Test retrieving task when JSON.GET returns empty list."""
-        mock_json = mock_redis.json.return_value
-        mock_json.get.return_value = []
-
-        store = RedisJSONTaskStore(mock_redis)
-        result = await store.get("task_123")
-
-        # Empty list should be treated as no result
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_update_task_exception(self, mock_redis, sample_task_data):
-        """Test update_task returns False when exception occurs during update."""
-        mock_json = mock_redis.json.return_value
-        mock_json.get.return_value = sample_task_data
-        # Simulate error during save
-        mock_json.set.side_effect = Exception("Connection error")
-
-        store = RedisJSONTaskStore(mock_redis)
-        result = await store.update_task("task_123", {"status": "completed"})
-
-        assert result is False

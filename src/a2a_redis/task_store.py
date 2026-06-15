@@ -20,8 +20,14 @@ from a2a.utils.constants import (
 from a2a.utils.errors import InvalidParamsError
 
 
-class RedisTaskStore(TaskStore):
-    """Redis hash-backed TaskStore with owner-scoped keys (v1.1 contract)."""
+class _RedisTaskStoreBase(TaskStore):
+    """Shared base for Redis-backed TaskStores (v1.1 contract).
+
+    Provides owner-scoped keys, a per-owner secondary index, filtering, and
+    pagination. Subclasses override only the payload storage hooks
+    (``_write_payload`` / ``_read_payload`` / ``_delete_payload``) to choose
+    between hash-encoded and RedisJSON-encoded persistence.
+    """
 
     # Over-fetch multiplier when filters might reduce the in-page hit count.
     _OVER_FETCH = 4
@@ -42,6 +48,8 @@ class RedisTaskStore(TaskStore):
         self.redis = redis_client
         self.prefix = prefix
         self._owner_resolver = owner_resolver
+
+    # ---------------- Key helpers ----------------
 
     def _task_key(self, owner: str, task_id: str) -> str:
         """Generate the owner-scoped Redis key for a task."""
@@ -69,6 +77,31 @@ class RedisTaskStore(TaskStore):
         # 20 digits accommodates any positive int64 micros value.
         return f"{micros:020d}:{task_id}"
 
+    # ---------------- Payload hooks (subclass override) ----------------
+
+    def _write_payload(self, pipe: Any, task_key: str, task_dict: Dict[str, Any],
+                       owner: str, task: Task, last_updated: str) -> None:
+        """Stage payload write on the given pipeline. Subclasses override."""
+        raise NotImplementedError
+
+    async def _read_payload(self, task_key: str) -> Optional[Dict[str, Any]]:
+        """Return the stored task payload as a dict, or None if absent."""
+        raise NotImplementedError
+
+    def _stage_payload_delete(self, pipe: Any, task_key: str) -> None:
+        """Stage payload deletion on the given pipeline."""
+        raise NotImplementedError
+
+    async def _fetch_payloads(self, owner: str,
+                              task_ids: List[str]) -> List[Optional[Dict[str, Any]]]:
+        """Fetch many task payloads as dicts. Subclasses may optimize."""
+        results: List[Optional[Dict[str, Any]]] = []
+        for tid in task_ids:
+            results.append(await self._read_payload(self._task_key(owner, tid)))
+        return results
+
+    # ---------------- CRUD ----------------
+
     async def save(self, task: Task, context: ServerCallContext) -> None:
         """Save a task to Redis under the resolved owner scope."""
         owner = self._owner_resolver(context)
@@ -77,13 +110,6 @@ class RedisTaskStore(TaskStore):
         last_updated = ""
         if task.status.HasField("timestamp"):
             last_updated = task.status.timestamp.ToDatetime().isoformat()
-        mapping: Dict[str, str] = {
-            "task_payload": json.dumps(task_dict),
-            "owner": owner,
-            "context_id": task.context_id,
-            "last_updated": last_updated,
-            "protocol_version": "1.0",
-        }
 
         task_key = self._task_key(owner, task.id)
         index_key = self._index_key(owner)
@@ -110,7 +136,7 @@ class RedisTaskStore(TaskStore):
             pipe.zrem(index_key, prior_member)
         pipe.zadd(index_key, {new_member: new_score})
         pipe.hset(score_key, task.id, str(new_score))
-        pipe.hset(task_key, mapping=mapping)
+        self._write_payload(pipe, task_key, task_dict, owner, task, last_updated)
         await pipe.execute()
 
     async def get(
@@ -118,15 +144,9 @@ class RedisTaskStore(TaskStore):
     ) -> Optional[Task]:
         """Retrieve a task for the resolved owner, or None if absent."""
         owner = self._owner_resolver(context)
-        data = await self.redis.hgetall(self._task_key(owner, task_id))
-        if not data:
+        task_dict = await self._read_payload(self._task_key(owner, task_id))
+        if not task_dict:
             return None
-        payload = data.get(b"task_payload") or data.get("task_payload")
-        if payload is None:
-            return None
-        if isinstance(payload, bytes):
-            payload = payload.decode()
-        task_dict = json.loads(payload)
         task = Task()
         ParseDict(task_dict, task)
         return task
@@ -154,7 +174,7 @@ class RedisTaskStore(TaskStore):
             prior_member = self._index_member(prior_micros, task_id)
             pipe.zrem(index_key, prior_member)
             pipe.hdel(score_key, task_id)
-        pipe.delete(task_key)
+        self._stage_payload_delete(pipe, task_key)
         await pipe.execute()
 
     # ---------------- list() helpers ----------------
@@ -205,19 +225,17 @@ class RedisTaskStore(TaskStore):
             page_size = MAX_LIST_TASKS_PAGE_SIZE
         return page_size
 
-    def _decode_payload_to_task(self, raw: Any) -> Optional[Task]:
-        """Decode a task_payload bytes/str blob back into a Task message."""
-        if raw is None:
+    @staticmethod
+    def _dict_to_task(task_dict: Optional[Dict[str, Any]]) -> Optional[Task]:
+        """Decode a task payload dict back into a Task message."""
+        if not task_dict:
             return None
-        if isinstance(raw, bytes):
-            raw = raw.decode()
         try:
-            task_dict = json.loads(raw)
-        except json.JSONDecodeError:
+            task = Task()
+            ParseDict(task_dict, task)
+            return task
+        except Exception:
             return None
-        task = Task()
-        ParseDict(task_dict, task)
-        return task
 
     @staticmethod
     def _passes_filters(task: Task, params: ListTasksRequest) -> bool:
@@ -279,7 +297,7 @@ class RedisTaskStore(TaskStore):
                 exhausted = True
                 break
 
-            # Resolve task_ids and fetch their task_payload via a pipeline.
+            # Resolve task_ids and fetch their payloads via the subclass hook.
             task_ids: List[str] = []
             for member in members:
                 if isinstance(member, bytes):
@@ -288,16 +306,13 @@ class RedisTaskStore(TaskStore):
                 _, _, tid = member.partition(":")
                 task_ids.append(tid)
 
-            pipe = self.redis.pipeline(transaction=False)
-            for tid in task_ids:
-                pipe.hget(self._task_key(owner, tid), "task_payload")
-            payloads = await pipe.execute()
+            payload_dicts = await self._fetch_payloads(owner, task_ids)
 
-            for idx, (tid, payload) in enumerate(zip(task_ids, payloads)):
+            for idx, (tid, task_dict) in enumerate(zip(task_ids, payload_dicts)):
                 # Whether we keep this row or skip it, the cursor advances
                 # past it -- we've fully inspected this index position.
                 next_cursor = cursor + idx + 1
-                task = self._decode_payload_to_task(payload)
+                task = self._dict_to_task(task_dict)
                 if task is None:
                     continue
                 if not self._passes_filters(task, params):
@@ -334,117 +349,137 @@ class RedisTaskStore(TaskStore):
         )
 
 
-class RedisJSONTaskStore(TaskStore):
-    """Redis JSON-backed TaskStore for native JSON operations.
+class RedisTaskStore(_RedisTaskStoreBase):
+    """Redis hash-backed TaskStore with owner-scoped keys (v1.1 contract)."""
 
-    Requires Redis server with RedisJSON module. Provides better performance
-    for complex nested data structures and JSONPath queries.
+    def _write_payload(self, pipe: Any, task_key: str, task_dict: Dict[str, Any],
+                       owner: str, task: Task, last_updated: str) -> None:
+        """Stage HSET of the task hash, including metadata columns."""
+        mapping: Dict[str, str] = {
+            "task_payload": json.dumps(task_dict),
+            "owner": owner,
+            "context_id": task.context_id,
+            "last_updated": last_updated,
+            "protocol_version": "1.0",
+        }
+        pipe.hset(task_key, mapping=mapping)
+
+    async def _read_payload(self, task_key: str) -> Optional[Dict[str, Any]]:
+        """Read task_payload from the Redis hash and decode the JSON blob."""
+        data = await self.redis.hgetall(task_key)
+        if not data:
+            return None
+        payload = data.get(b"task_payload") or data.get("task_payload")
+        if payload is None:
+            return None
+        if isinstance(payload, bytes):
+            payload = payload.decode()
+        try:
+            return json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+
+    def _stage_payload_delete(self, pipe: Any, task_key: str) -> None:
+        """Stage DEL of the hash key."""
+        pipe.delete(task_key)
+
+    async def _fetch_payloads(self, owner: str,
+                              task_ids: List[str]) -> List[Optional[Dict[str, Any]]]:
+        """Pipeline HGET of each task_payload field, in order."""
+        pipe = self.redis.pipeline(transaction=False)
+        for tid in task_ids:
+            pipe.hget(self._task_key(owner, tid), "task_payload")
+        raw_values = await pipe.execute()
+
+        results: List[Optional[Dict[str, Any]]] = []
+        for raw in raw_values:
+            if raw is None:
+                results.append(None)
+                continue
+            if isinstance(raw, bytes):
+                raw = raw.decode()
+            try:
+                results.append(json.loads(raw))
+            except json.JSONDecodeError:
+                results.append(None)
+        return results
+
+
+class RedisJSONTaskStore(_RedisTaskStoreBase):
+    """RedisJSON-backed TaskStore with owner-scoped keys (v1.1 contract).
+
+    Stores the task payload as a native JSON document at the root path ``$``.
+    Requires a Redis server with the RedisJSON module loaded (e.g.
+    ``redis/redis-stack``). The per-owner secondary index and score hash are
+    plain Redis structures, identical to :class:`RedisTaskStore`.
     """
 
-    def __init__(self, redis_client: redis.Redis, prefix: str = "task:"):
-        """Initialize the Redis JSON task store.
+    def _write_payload(self, pipe: Any, task_key: str, task_dict: Dict[str, Any],
+                       owner: str, task: Task, last_updated: str) -> None:
+        """Stage a JSON.SET of the task document at root ``$``.
 
-        Args:
-            redis_client: Redis client instance with JSON support
-            prefix: Key prefix for task storage
+        Uses ``execute_command`` directly to avoid relying on the JSON helper
+        wrapper from inside an async pipeline (the helper class is sync-only;
+        the raw command works on any pipeline).
         """
-        self.redis = redis_client
-        self.prefix = prefix
+        pipe.execute_command("JSON.SET", task_key, "$", json.dumps(task_dict))
 
-    def _task_key(self, task_id: str) -> str:
-        """Generate the Redis key for a task."""
-        return f"{self.prefix}{task_id}"
+    @staticmethod
+    def _normalize_json_result(raw: Any) -> Optional[Dict[str, Any]]:
+        """Coerce a JSON.GET response into a single task-dict (or None)."""
+        if raw is None:
+            return None
+        # Async client returns bytes/str (no JSON helper decode); decode here.
+        if isinstance(raw, (bytes, bytearray)):
+            try:
+                raw = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return None
+        elif isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                return None
+        if isinstance(raw, list):
+            if not raw:
+                return None
+            first = raw[0]
+            return first if isinstance(first, dict) else None
+        if isinstance(raw, dict):
+            return raw
+        return None
 
-    async def save(self, task: Task, context: ServerCallContext | None = None) -> None:
-        """Save a task to Redis using JSON.
+    async def _read_payload(self, task_key: str) -> Optional[Dict[str, Any]]:
+        """Read the JSON document at the task key.
 
-        Args:
-            task: Task instance to save
-            context: Optional server call context (unused, for interface compatibility)
-        """
-        task_data = task.model_dump() if hasattr(task, "model_dump") else task
-        await self.redis.json().set(self._task_key(task.id), "$", task_data)  # type: ignore[misc]
-
-    async def get(
-        self, task_id: str, context: ServerCallContext | None = None
-    ) -> Optional[Task]:
-        """Retrieve a task from Redis using JSON.
-
-        Args:
-            task_id: Task identifier
-            context: Optional server call context (unused, for interface compatibility)
-
-        Returns:
-            Task instance or None if not found
+        Returns the decoded dict, or None if the key is absent or empty.
         """
         try:
-            result = await self.redis.json().get(self._task_key(task_id))  # type: ignore[misc]
-            if result:
-                # RedisJSON get with JSONPath can return list or dict
-                if isinstance(result, list) and result:
-                    task_data = result[0]  # type: ignore[misc]
-                elif isinstance(result, dict):
-                    task_data = result  # type: ignore[assignment]
-                else:
-                    return None
-                return Task(**task_data)  # type: ignore[misc]
+            raw = await self.redis.execute_command("JSON.GET", task_key)
+        except Exception:
             return None
-        except (Exception,):  # type: ignore[misc]
-            return None
+        return self._normalize_json_result(raw)
 
-    async def delete(
-        self, task_id: str, context: ServerCallContext | None = None
-    ) -> None:
-        """Delete a task from Redis.
+    def _stage_payload_delete(self, pipe: Any, task_key: str) -> None:
+        """Stage a JSON.DEL of the root document.
 
-        Args:
-            task_id: Task identifier
-            context: Optional server call context (unused, for interface compatibility)
+        Equivalent to ``DEL`` for a key whose only content is its JSON
+        document, but uses the native JSON op for clarity.
         """
-        await self.redis.delete(self._task_key(task_id))  # type: ignore[misc]
+        pipe.execute_command("JSON.DEL", task_key)
 
-    async def update_task(self, task_id: str, updates: Dict[str, Any]) -> bool:
-        """Update an existing task in Redis using JSON.
-
-        Args:
-            task_id: Task identifier
-            updates: Dictionary of fields to update
-
-        Returns:
-            True if task was updated, False if task doesn't exist
-        """
+    async def _fetch_payloads(self, owner: str,
+                              task_ids: List[str]) -> List[Optional[Dict[str, Any]]]:
+        """Pipeline JSON.GET of each task document, in order."""
         try:
-            task = await self.get(task_id)
-            if task is None:
-                return False
+            pipe = self.redis.pipeline(transaction=False)
+            for tid in task_ids:
+                pipe.execute_command(
+                    "JSON.GET", self._task_key(owner, tid)
+                )
+            raw_values = await pipe.execute()
+        except Exception:
+            # Fall back to sequential reads if pipelining JSON ops fails.
+            return await super()._fetch_payloads(owner, task_ids)
 
-            task_data = task.model_dump() if hasattr(task, "model_dump") else task  # type: ignore[misc]
-            task_data.update(updates)  # type: ignore[misc]
-            updated_task = Task(**task_data)  # type: ignore[misc]
-            await self.save(updated_task)
-            return True
-        except Exception:  # type: ignore[misc]
-            return False
-
-    async def list_task_ids(self, pattern: str = "*") -> List[str]:
-        """List all task IDs matching a pattern.
-
-        Args:
-            pattern: Pattern to match task IDs against
-
-        Returns:
-            List of task IDs
-        """
-        keys = await self.redis.keys(f"{self.prefix}{pattern}")  # type: ignore[misc]
-        return [key.decode().replace(self.prefix, "") for key in keys]  # type: ignore[misc]
-
-    async def task_exists(self, task_id: str) -> bool:
-        """Check if a task exists in Redis.
-
-        Args:
-            task_id: Task identifier
-
-        Returns:
-            True if task exists, False otherwise
-        """
-        return bool(await self.redis.exists(self._task_key(task_id)))  # type: ignore[misc]
+        return [self._normalize_json_result(raw) for raw in raw_values]
