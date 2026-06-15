@@ -43,6 +43,9 @@ dev = [
 ]
 encryption = ["cryptography>=42.0"]
 
+[project.scripts]
+a2a-redis-migrate = "a2a_redis.migrate:main"
+
 [project.urls]
 Homepage = "https://github.com/redis-developer/a2a-redis"
 Repository = "https://github.com/redis-developer/a2a-redis"
