@@ -1,5 +1,7 @@
 """Redis components for the Agent-to-Agent (A2A) Python SDK."""
 
+from a2a.server.events import EventQueueLegacy
+
 from .push_notification_config_store import RedisPushNotificationConfigStore
 from .streams_queue_manager import RedisStreamsQueueManager
 from .streams_queue import RedisStreamsEventQueue
@@ -8,7 +10,6 @@ from .pubsub_queue import RedisPubSubEventQueue
 from .task_store import RedisJSONTaskStore, RedisTaskStore
 from .streams_consumer_strategy import ConsumerGroupStrategy, ConsumerGroupConfig
 from .queue_types import QueueType
-from .event_queue_protocol import EventQueueProtocol
 
 __version__ = "0.3.0a1"
 
@@ -27,6 +28,6 @@ __all__ = [
     "ConsumerGroupStrategy",
     "ConsumerGroupConfig",
     "QueueType",
-    # Protocols
-    "EventQueueProtocol",
+    # SDK re-exports for convenience
+    "EventQueueLegacy",
 ]

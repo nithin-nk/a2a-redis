@@ -122,7 +122,7 @@ def sample_task_data():
     return {
         "id": "task_123",
         "context_id": "context_456",
-        "status": TaskStatus(state=TaskState.submitted),
+        "status": TaskStatus(state=TaskState.TASK_STATE_SUBMITTED),
         "metadata": {
             "user_id": "user_456",
             "priority": "high",

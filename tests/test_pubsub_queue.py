@@ -129,14 +129,15 @@ class TestRedisPubSubEventQueue:
         mock_pubsub.unsubscribe.assert_called_once_with("pubsub:task_123")
         mock_pubsub.close.assert_called_once()
 
-    def test_tap_queue(self, mock_redis):
-        """Test creating a tap of the queue."""
+    @pytest.mark.asyncio
+    async def test_tap_queue(self, mock_redis):
+        """Test creating a tap of the queue (now async per v1.1 EventQueueLegacy)."""
         # Mock pubsub to avoid actual Redis calls during init
         mock_pubsub = MagicMock()
         mock_redis.pubsub.return_value = mock_pubsub
 
         queue = RedisPubSubEventQueue(mock_redis, "task_123", prefix="test:")
-        tap = queue.tap()
+        tap = await queue.tap()
 
         assert isinstance(tap, RedisPubSubEventQueue)
         assert tap.task_id == "task_123"
@@ -202,3 +203,56 @@ class TestRedisPubSubEventQueue:
         await queue._ensure_setup()
         assert queue._pubsub is None
         assert not queue._setup_complete
+
+    @pytest.mark.asyncio
+    async def test_is_closed_lifecycle(self, mock_redis):
+        """is_closed() is False initially and True after close()."""
+        queue = RedisPubSubEventQueue(mock_redis, "task_123")
+        assert queue.is_closed() is False
+        await queue.close()
+        assert queue.is_closed() is True
+
+    @pytest.mark.asyncio
+    async def test_close_immediate_blocks_enqueue(self, mock_redis):
+        """close(immediate=True) prevents subsequent enqueue_event."""
+        queue = RedisPubSubEventQueue(mock_redis, "task_123")
+        await queue.close(immediate=True)
+        assert queue.is_closed() is True
+        with pytest.raises(RuntimeError, match="Cannot enqueue to closed queue"):
+            await queue.enqueue_event({"test": "data"})
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "event_type_name",
+        ["Message", "Task", "TaskStatusUpdateEvent", "TaskArtifactUpdateEvent"],
+    )
+    async def test_enqueue_dequeue_roundtrip_per_event_type(
+        self, mock_redis, event_type_name
+    ):
+        """Roundtrip for each v1.1 Event union member through pub/sub publish path."""
+        from a2a import types as a2a_types
+        from google.protobuf.json_format import MessageToDict
+
+        mock_pubsub = MagicMock()
+        mock_pubsub.subscribe = AsyncMock()
+        mock_redis.pubsub.return_value = mock_pubsub
+        mock_redis.publish = AsyncMock()
+
+        ProtoCls = getattr(a2a_types, event_type_name)
+        instance = ProtoCls()
+        # Populate a couple of safe fields when present (no required fields in proto3).
+        if event_type_name in {"Message", "Task"} and hasattr(instance, "id"):
+            instance.id = "test-id"
+        if event_type_name == "Message":
+            instance.message_id = "msg-1"
+
+        queue = RedisPubSubEventQueue(mock_redis, "task_123")
+        await queue.enqueue_event(instance)
+
+        # Confirm publish was called with a JSON message tagged with the right type.
+        mock_redis.publish.assert_called_once()
+        published_json = mock_redis.publish.call_args[0][1]
+        payload = json.loads(published_json)
+        assert payload["event_type"] == event_type_name
+        # Dict shape should match MessageToDict of the original.
+        assert payload["event_data"] == MessageToDict(instance)

@@ -1,95 +1,66 @@
-"""Redis Pub/Sub queue manager implementation for the A2A Python SDK.
+"""Redis Pub/Sub-backed ``QueueManager`` implementation.
 
-This module provides a Redis Pub/Sub-based QueueManager implementation for real-time,
-fire-and-forget event delivery with natural broadcasting patterns.
-
-For reliable, persistent event processing, consider RedisStreamsQueueManager instead.
+Conforms to the v1.1 a2a SDK ``QueueManager`` interface: all methods are
+async and operate on ``EventQueueLegacy`` instances (here, our
+``RedisPubSubEventQueue`` subclass).
 """
 
+import asyncio
 from typing import Dict, Optional
 
 import redis.asyncio as redis
-from a2a.server.events.queue_manager import QueueManager
+from a2a.server.events import EventQueueLegacy, QueueManager
 
-from .event_queue_protocol import EventQueueProtocol
 from .pubsub_queue import RedisPubSubEventQueue
 
 
 class RedisPubSubQueueManager(QueueManager):
-    """Redis Pub/Sub-backed QueueManager for real-time, fire-and-forget event delivery.
-
-    Provides immediate event broadcasting with minimal latency but no persistence
-    or delivery guarantees. See README.md for detailed use cases and trade-offs.
-    """
+    """Redis Pub/Sub-backed ``QueueManager`` for real-time fan-out."""
 
     def __init__(self, redis_client: redis.Redis, prefix: str = "pubsub:"):
-        """Initialize the Redis Pub/Sub queue manager.
-
-        Args:
-            redis_client: Redis client instance
-            prefix: Key prefix for pub/sub channels
-        """
         self.redis = redis_client
         self.prefix = prefix
-        self._queues: Dict[str, EventQueueProtocol] = {}
+        self._queues: Dict[str, RedisPubSubEventQueue] = {}
+        self._lock = asyncio.Lock()
 
-    def _create_queue(self, task_id: str) -> EventQueueProtocol:
-        """Create a Redis Pub/Sub queue instance for a task."""
+    def _create_queue(self, task_id: str) -> RedisPubSubEventQueue:
+        """Create a new ``RedisPubSubEventQueue`` for a task."""
         return RedisPubSubEventQueue(self.redis, task_id, self.prefix)
 
-    async def add(self, task_id: str, queue: EventQueueProtocol) -> None:  # type: ignore[override]
-        """Add a queue for a task (a2a-sdk interface).
+    async def add(self, task_id: str, queue: EventQueueLegacy) -> None:
+        """Register a queue for ``task_id``.
 
-        Args:
-            task_id: Task identifier
-            queue: EventQueue instance to add (ignored, we create our own)
+        The ``queue`` argument is accepted for interface compatibility but
+        we always create our own ``RedisPubSubEventQueue`` so the channel
+        configuration stays consistent.
         """
-        # For Redis implementation, we create our own queue but this maintains interface
-        self._queues[task_id] = self._create_queue(task_id)
+        del queue  # we own queue creation for Redis-backed task IDs
+        async with self._lock:
+            self._queues[task_id] = self._create_queue(task_id)
+
+    async def get(self, task_id: str) -> Optional[EventQueueLegacy]:
+        """Return the queue for ``task_id`` if one exists."""
+        async with self._lock:
+            return self._queues.get(task_id)
+
+    async def tap(self, task_id: str) -> Optional[EventQueueLegacy]:
+        """Return a sibling subscriber for ``task_id`` if a parent exists."""
+        async with self._lock:
+            queue = self._queues.get(task_id)
+        if queue is None:
+            return None
+        return await queue.tap()
 
     async def close(self, task_id: str) -> None:
-        """Close a queue for a task (a2a-sdk interface).
+        """Close and remove the queue for ``task_id``."""
+        async with self._lock:
+            queue = self._queues.pop(task_id, None)
+        if queue is not None:
+            await queue.close()
 
-        Args:
-            task_id: Task identifier
-        """
-        if task_id in self._queues:
-            await self._queues[task_id].close()
-            del self._queues[task_id]
-
-    async def create_or_tap(self, task_id: str) -> EventQueueProtocol:  # type: ignore[override]
-        """Create or get existing queue for a task (a2a-sdk interface).
-
-        Args:
-            task_id: Task identifier
-
-        Returns:
-            EventQueue instance for the task
-        """
-        if task_id not in self._queues:
-            self._queues[task_id] = self._create_queue(task_id)
-        return self._queues[task_id]
-
-    async def get(self, task_id: str) -> Optional[EventQueueProtocol]:  # type: ignore[override]
-        """Get existing queue for a task (a2a-sdk interface).
-
-        Args:
-            task_id: Task identifier
-
-        Returns:
-            EventQueue instance or None if not found
-        """
-        return self._queues.get(task_id)
-
-    async def tap(self, task_id: str) -> Optional[EventQueueProtocol]:  # type: ignore[override]
-        """Create a tap of existing queue for a task (a2a-sdk interface).
-
-        Args:
-            task_id: Task identifier
-
-        Returns:
-            EventQueue tap or None if queue doesn't exist
-        """
-        if task_id in self._queues:
-            return self._queues[task_id].tap()
-        return None
+    async def create_or_tap(self, task_id: str) -> EventQueueLegacy:
+        """Create the queue if absent, otherwise return the existing one."""
+        async with self._lock:
+            if task_id not in self._queues:
+                self._queues[task_id] = self._create_queue(task_id)
+            return self._queues[task_id]

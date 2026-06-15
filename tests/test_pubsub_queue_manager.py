@@ -134,16 +134,33 @@ class TestRedisPubSubEventQueue:
         mock_pubsub.unsubscribe.assert_called_once_with("pubsub:task_123")
         mock_pubsub.close.assert_called_once()
 
-    def test_tap_queue(self, mock_redis):
-        """Test creating a tap of the queue."""
+    @pytest.mark.asyncio
+    async def test_tap_queue(self, mock_redis):
+        """Test creating a tap of the queue (now async per v1.1 EventQueueLegacy)."""
         queue = RedisPubSubEventQueue(mock_redis, "task_123")
-        tap = queue.tap()
+        tap = await queue.tap()
 
         assert isinstance(tap, RedisPubSubEventQueue)
         assert tap.redis == mock_redis
         assert tap.task_id == "task_123"
         assert tap.prefix == queue.prefix
         assert tap is not queue  # Should be a different instance
+
+    @pytest.mark.asyncio
+    async def test_is_closed_lifecycle(self, mock_redis):
+        """is_closed() is False initially and True after close()."""
+        queue = RedisPubSubEventQueue(mock_redis, "task_123")
+        assert queue.is_closed() is False
+        await queue.close()
+        assert queue.is_closed() is True
+
+    @pytest.mark.asyncio
+    async def test_close_immediate_blocks_enqueue(self, mock_redis):
+        """close(immediate=True) prevents subsequent enqueue_event."""
+        queue = RedisPubSubEventQueue(mock_redis, "task_123")
+        await queue.close(immediate=True)
+        with pytest.raises(RuntimeError, match="Cannot enqueue to closed queue"):
+            await queue.enqueue_event({"x": 1})
 
     def test_task_done(self, mock_redis):
         """Test task_done method (no-op for pub/sub)."""

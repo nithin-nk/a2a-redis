@@ -1,152 +1,97 @@
-"""Redis Pub/Sub-backed event queue implementation for the A2A Python SDK.
+"""Redis Pub/Sub-backed ``EventQueueLegacy`` implementation.
 
-This module provides a Redis Pub/Sub-based implementation of EventQueue as an alternative
-to the default Redis Streams implementation. Choose based on your use case:
-
-**Redis Streams (default - RedisEventQueue)**:
-- ✅ Persistent event storage (events survive consumer restarts)
-- ✅ Guaranteed delivery with acknowledgments
-- ✅ Consumer groups for load balancing
-- ✅ Event replay and audit trail
-- ✅ Automatic failure recovery
-- ❌ Higher memory usage (events persist until trimmed)
-- ❌ More complex setup (consumer groups)
-
-**Redis Pub/Sub (this module - RedisPubSubEventQueue)**:
-- ✅ Real-time, low-latency delivery
-- ✅ Minimal memory usage (fire-and-forget)
-- ✅ Simple broadcast pattern
-- ✅ Natural fan-out to multiple consumers
-- ❌ No persistence (offline consumers miss events)
-- ❌ No delivery guarantees
-- ❌ No replay capability
-- ❌ Limited error recovery
-
-**When to use Pub/Sub**:
-- Real-time notifications (UI updates, live dashboards)
-- Broadcasting system events
-- Non-critical event distribution
-- Low-latency requirements
-- Simple fan-out scenarios
-
-**When to use Streams**:
-- Task event queues requiring reliability
-- Audit trails and event history
-- Work distribution requiring guarantees
-- Systems requiring replay capability
-- Critical event processing
+Conforms to the v1.1 a2a SDK ``EventQueueLegacy`` interface (async ``tap``,
+``close(immediate=...)``). Optimized for real-time fan-out with no
+persistence or delivery guarantees; see README.md for trade-offs vs.
+``RedisStreamsEventQueue``.
 """
 
 import asyncio
-from typing import Union, Optional, Dict, Any
+from typing import Any, Dict, Optional
 
 import redis.asyncio as redis
 from redis.asyncio.client import PubSub
-from a2a.types import Message, Task, TaskStatusUpdateEvent, TaskArtifactUpdateEvent
 
-from .event_queue_protocol import EventQueueProtocol
+from a2a.server.events import EventQueueLegacy
+from a2a.server.events.event_queue import DEFAULT_MAX_QUEUE_SIZE, Event
+
 from .model_utils import (
+    deserialize_event,
     deserialize_from_json,
     serialize_event,
-    deserialize_event,
     serialize_to_json,
 )
 
 
-class RedisPubSubEventQueue:
-    """Redis Pub/Sub-backed EventQueue for real-time, fire-and-forget event delivery.
+class RedisPubSubEventQueue(EventQueueLegacy):
+    """Redis Pub/Sub-backed ``EventQueueLegacy``.
 
-    Provides immediate event broadcasting with minimal latency but no persistence
-    or delivery guarantees. See README.md for detailed use cases and trade-offs.
+    Subclasses ``EventQueueLegacy`` so it can stand in wherever the SDK
+    expects an ``EventQueueLegacy``. The parent ``__init__`` is bypassed
+    because we do not use an in-process ``asyncio.Queue``.
     """
 
     def __init__(
-        self, redis_client: redis.Redis, task_id: str, prefix: str = "pubsub:"
+        self,
+        redis_client: redis.Redis,
+        task_id: str,
+        prefix: str = "pubsub:",
     ):
-        """Initialize Redis Pub/Sub event queue.
-
-        Args:
-            redis_client: Redis client instance
-            task_id: Task identifier this queue is for
-            prefix: Key prefix for pub/sub channels
-        """
+        # Do NOT call super().__init__(); Redis owns storage.
         self.redis = redis_client
         self.task_id = task_id
         self.prefix = prefix
-        self._closed = False
         self._channel = f"{prefix}{task_id}"
 
-        # Pub/Sub subscription management
+        # Mirror parent attributes so inherited helpers / isinstance work.
+        self._is_closed = False
+        self._children: list[EventQueueLegacy] = []
+        self._lock = asyncio.Lock()
+
+        # Backwards-compat alias used by existing tests.
+        self._closed = False
+
         self._pubsub: Optional[PubSub] = None
         self._setup_complete = False
 
     async def _ensure_setup(self) -> None:
-        """Ensure pub/sub subscription is set up."""
-        if self._setup_complete or self._closed:
+        """Lazily set up the pub/sub subscription."""
+        if self._setup_complete or self._closed or self._is_closed:
             return
 
         self._pubsub = self.redis.pubsub()  # type: ignore[misc]
         await self._pubsub.subscribe(self._channel)  # type: ignore[misc]
         self._setup_complete = True
 
-    async def enqueue_event(
-        self,
-        event: Union[Message, Task, TaskStatusUpdateEvent, TaskArtifactUpdateEvent],
-    ) -> None:
+    async def enqueue_event(self, event: Event) -> None:
         """Publish an event to the pub/sub channel.
 
-        Events are immediately published to all active subscribers. If no subscribers
-        are listening, the event is lost.
-
         Args:
-            event: Event to publish
-
-        Raises:
-            RuntimeError: If queue is closed
+            event: A v1.1 SDK event (``Message`` / ``Task`` /
+                ``TaskStatusUpdateEvent`` / ``TaskArtifactUpdateEvent``).
         """
-        if self._closed:
+        if self._closed or self._is_closed:
             raise RuntimeError("Cannot enqueue to closed queue")
 
-        # Ensure subscription setup
         await self._ensure_setup()
 
-        # Serialize event using shared utility
         event_structure = serialize_event(event)
         message = serialize_to_json(event_structure)
-
-        # Publish to Redis pub/sub channel
         await self.redis.publish(self._channel, message)  # type: ignore[misc]
 
-    async def dequeue_event(
-        self, no_wait: bool = False
-    ) -> Union[Message, Task, TaskStatusUpdateEvent, TaskArtifactUpdateEvent]:
-        """Remove and return an event from the queue.
-
-        This method retrieves events that were published to the channel and received
-        by this subscriber. Events published before subscription started are not available.
-
-        Args:
-            no_wait: If True, return immediately if no events available
-
-        Returns:
-            Event data dictionary
-
-        Raises:
-            RuntimeError: If queue is closed or no events available
-        """
-        if self._closed:
+    async def dequeue_event(self, no_wait: bool = False) -> Event:
+        """Wait for the next published event on this subscriber."""
+        if self._closed or self._is_closed:
             raise RuntimeError("Cannot dequeue from closed queue")
 
-        # Ensure subscription setup
         await self._ensure_setup()
 
         if not self._pubsub:
             raise RuntimeError("Pub/sub not initialized")
 
-        timeout = 0.1 if no_wait else 1.0  # Shorter timeout for no_wait
+        timeout = 0.1 if no_wait else 1.0
 
         try:
-            # Get message with timeout
             message: Optional[Dict[str, Any]] = await asyncio.wait_for(  # type: ignore[assignment]
                 self._pubsub.get_message(ignore_subscribe_messages=True),  # type: ignore[misc]
                 timeout=timeout,
@@ -155,19 +100,34 @@ class RedisPubSubEventQueue:
             if message is None:
                 raise RuntimeError("No events available")
 
-            # Deserialize event data using shared utility
             event_structure = deserialize_from_json(message["data"])
-            message_data = deserialize_event(event_structure)
-            return message_data
+            return deserialize_event(event_structure)
 
         except asyncio.TimeoutError:
             raise RuntimeError("No events available")
 
-    async def close(self) -> None:
-        """Close the queue and clean up pub/sub subscription."""
-        self._closed = True
+    async def tap(
+        self, max_queue_size: int = DEFAULT_MAX_QUEUE_SIZE
+    ) -> "RedisPubSubEventQueue":
+        """Create another subscriber to the same channel.
 
-        # Clean up pub/sub subscription
+        Pub/Sub broadcasts naturally to every subscriber, so each tap is a
+        peer rather than a downstream child. The ``max_queue_size`` argument
+        exists for signature compatibility with ``EventQueueLegacy.tap``.
+        """
+        del max_queue_size  # signature compatibility only
+        child = RedisPubSubEventQueue(self.redis, self.task_id, self.prefix)
+        self._children.append(child)
+        return child
+
+    async def close(self, immediate: bool = False) -> None:
+        """Close the queue and unsubscribe from the channel."""
+        async with self._lock:
+            if (self._is_closed or self._closed) and not immediate:
+                return
+            self._is_closed = True
+            self._closed = True
+
         if self._pubsub:
             try:
                 await self._pubsub.unsubscribe(self._channel)  # type: ignore[misc]
@@ -176,21 +136,17 @@ class RedisPubSubEventQueue:
                 pass
             finally:
                 self._pubsub = None
-
                 self._setup_complete = False
+
+        await asyncio.gather(
+            *(child.close(immediate) for child in self._children),
+            return_exceptions=True,
+        )
 
     def is_closed(self) -> bool:
         """Check if the queue is closed."""
-        return self._closed
-
-    def tap(self) -> "EventQueueProtocol":
-        """Create a tap (copy) of this queue.
-
-        For pub/sub, this creates a new subscriber to the same channel.
-        All taps will receive the same events (broadcast behavior).
-        """
-        return RedisPubSubEventQueue(self.redis, self.task_id, self.prefix)
+        return self._is_closed or self._closed
 
     def task_done(self) -> None:
-        """Mark a task as done (no-op for pub/sub)."""
-        pass  # Pub/sub doesn't need explicit task completion
+        """No-op for pub/sub (no explicit completion signal)."""
+        return None

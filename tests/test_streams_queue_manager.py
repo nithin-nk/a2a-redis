@@ -222,16 +222,62 @@ class TestRedisStreamsEventQueue:
             "stream:task_123", queue.consumer_group, b"123-0", b"124-0"
         )
 
-    def test_tap_queue(self, mock_redis):
-        """Test creating a tap of the queue."""
+    @pytest.mark.asyncio
+    async def test_tap_queue(self, mock_redis):
+        """Test creating a tap of the queue (now async per v1.1 EventQueueLegacy)."""
         queue = RedisStreamsEventQueue(mock_redis, "task_123")
-        tap = queue.tap()
+        tap = await queue.tap()
 
         assert isinstance(tap, RedisStreamsEventQueue)
         assert tap.redis == mock_redis
         assert tap.task_id == "task_123"
         assert tap.prefix == queue.prefix
         assert tap is not queue  # Should be a different instance
+
+    @pytest.mark.asyncio
+    async def test_is_closed_lifecycle(self, mock_redis):
+        """is_closed() is False initially and True after close()."""
+        queue = RedisStreamsEventQueue(mock_redis, "task_123")
+        assert queue.is_closed() is False
+        await queue.close()
+        assert queue.is_closed() is True
+
+    @pytest.mark.asyncio
+    async def test_close_immediate_blocks_enqueue(self, mock_redis):
+        """close(immediate=True) prevents subsequent enqueue_event."""
+        queue = RedisStreamsEventQueue(mock_redis, "task_123")
+        await queue.close(immediate=True)
+        with pytest.raises(RuntimeError, match="Cannot enqueue to closed queue"):
+            await queue.enqueue_event({"x": 1})
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "event_type_name",
+        ["Message", "Task", "TaskStatusUpdateEvent", "TaskArtifactUpdateEvent"],
+    )
+    async def test_enqueue_roundtrip_per_event_type(
+        self, mock_redis, event_type_name
+    ):
+        """Each v1.1 Event union member serializes through XADD with the right tag."""
+        import json
+
+        from a2a import types as a2a_types
+        from google.protobuf.json_format import MessageToDict
+
+        ProtoCls = getattr(a2a_types, event_type_name)
+        instance = ProtoCls()
+        if event_type_name == "Message":
+            instance.message_id = "msg-1"
+        elif event_type_name == "Task":
+            instance.id = "task-1"
+
+        queue = RedisStreamsEventQueue(mock_redis, "task_123")
+        await queue.enqueue_event(instance)
+
+        mock_redis.xadd.assert_called_once()
+        fields = mock_redis.xadd.call_args[0][1]
+        assert fields["event_type"] == event_type_name
+        assert json.loads(fields["event_data"]) == MessageToDict(instance)
 
     def test_task_done(self, mock_redis):
         """Test task_done method (no-op for streams)."""

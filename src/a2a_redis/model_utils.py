@@ -1,21 +1,47 @@
-"""Utilities for handling Pydantic model serialization/deserialization in Redis queues."""
+"""Utilities for serializing/deserializing A2A protobuf events for Redis queues.
+
+The v1.1 SDK exposes ``Event = Message | Task | TaskStatusUpdateEvent |
+TaskArtifactUpdateEvent`` as protobuf-generated message classes (no longer
+Pydantic models). v1.0 ProtoJSON switched enum encoding to SCREAMING_SNAKE_CASE;
+``google.protobuf.json_format.MessageToDict``/``ParseDict`` honor that change
+natively, so we use them directly and avoid any custom enum lowercasing.
+"""
 
 import json
 from typing import Any, Union, cast
 
-import a2a.types
+from google.protobuf.json_format import MessageToDict, ParseDict
+from google.protobuf.message import Message as ProtoMessage
+
+from a2a.types import (
+    Message,
+    Task,
+    TaskArtifactUpdateEvent,
+    TaskStatusUpdateEvent,
+)
+
+
+# Map of event type names -> proto Message class. Restricted to the v1.1 Event
+# union; the v0.2 PushNotificationConfig alias is intentionally absent.
+_EVENT_TYPES: dict[str, type[ProtoMessage]] = {
+    "Message": Message,
+    "Task": Task,
+    "TaskStatusUpdateEvent": TaskStatusUpdateEvent,
+    "TaskArtifactUpdateEvent": TaskArtifactUpdateEvent,
+}
 
 
 def serialize_event(event: Any) -> dict[str, Any]:
-    """Serialize an event to a dictionary structure for Redis storage.
+    """Serialize an event to a {event_type, event_data} dictionary.
 
-    Args:
-        event: Event object to serialize
-
-    Returns:
-        Dictionary with event_type and event_data
+    Protobuf messages are converted with ``MessageToDict`` which preserves the
+    v1.0 ProtoJSON SCREAMING_SNAKE_CASE enum encoding. Non-protobuf inputs
+    (legacy dicts, plain values used in tests) are passed through, falling
+    back to ``model_dump`` when present for backwards compatibility.
     """
-    if hasattr(event, "model_dump"):
+    if isinstance(event, ProtoMessage):
+        event_data: Any = MessageToDict(event)
+    elif hasattr(event, "model_dump"):
         event_data = event.model_dump()
     else:
         event_data = event
@@ -24,29 +50,25 @@ def serialize_event(event: Any) -> dict[str, Any]:
 
 
 def deserialize_event(event_structure: Any) -> Any:
-    """Deserialize an event from a dictionary structure back to a Pydantic model.
+    """Reconstruct a protobuf event from a serialized structure.
 
-    Args:
-        event_structure: Dictionary containing event_type and event_data
-
-    Returns:
-        Reconstructed Pydantic model instance or raw data as fallback
+    Returns the original ``event_data`` (or pass-through value) when the
+    type is unknown or reconstruction fails.
     """
     if not isinstance(event_structure, dict) or "event_data" not in event_structure:
         return cast(Any, event_structure)
 
-    # Cast to typed dict for type safety
     typed_structure: dict[str, Any] = cast(dict[str, Any], event_structure)
     event_data: Any = typed_structure["event_data"]
     event_type: str | None = typed_structure.get("event_type")
 
-    # Re-construct the Pydantic model if type info is available
-    if event_type and hasattr(a2a.types, event_type):
-        ModelClass: type[Any] = getattr(a2a.types, event_type)
+    if event_type and event_type in _EVENT_TYPES:
+        proto_cls = _EVENT_TYPES[event_type]
         try:
-            return ModelClass(**event_data)
+            instance = proto_cls()
+            ParseDict(event_data, instance)
+            return instance
         except Exception:
-            # Fallback if model reconstruction fails
             return event_data
 
     return event_data
