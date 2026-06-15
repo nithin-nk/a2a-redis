@@ -4,7 +4,7 @@ import json
 import pytest
 
 from a2a_redis.push_notification_config_store import RedisPushNotificationConfigStore
-from a2a.types import PushNotificationConfig
+from a2a.types import TaskPushNotificationConfig as PushNotificationConfig
 
 
 class TestRedisPushNotificationConfigStore:

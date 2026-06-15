@@ -6,12 +6,34 @@ import redis
 import redis.asyncio as redis_async
 from unittest.mock import MagicMock, AsyncMock
 
+from a2a.auth.user import User
+from a2a.server.context import ServerCallContext
+
 from a2a_redis import (
     RedisTaskStore,
     RedisStreamsQueueManager,
     RedisPubSubQueueManager,
     RedisPushNotificationConfigStore,
 )
+
+
+class SampleUser(User):
+    """A test implementation of the User interface."""
+
+    def __init__(self, user_name: str):
+        self._user_name = user_name
+
+    @property
+    def is_authenticated(self) -> bool:
+        return True
+
+    @property
+    def user_name(self) -> str:
+        return self._user_name
+
+
+TEST_CONTEXT = ServerCallContext(user=SampleUser('test_user'))
+TEST_CONTEXT_OTHER = ServerCallContext(user=SampleUser('other_user'))
 
 
 @pytest.fixture
