@@ -6,330 +6,107 @@ from unittest.mock import MagicMock
 
 from a2a_redis.task_store import RedisTaskStore, RedisJSONTaskStore
 
+from tests.conftest import TEST_CONTEXT, TEST_CONTEXT_OTHER
+
+
+def _build_task(task_id: str = "task_123", context_id: str = "context_456"):
+    """Build a protobuf Task for tests."""
+    from a2a.types.a2a_pb2 import Task, TaskStatus
+    from a2a.types.a2a_pb2 import TASK_STATE_SUBMITTED
+
+    task = Task(id=task_id, context_id=context_id)
+    task.status.CopyFrom(TaskStatus(state=TASK_STATE_SUBMITTED))
+    return task
+
 
 class TestRedisTaskStore:
-    """Tests for RedisTaskStore."""
+    """Unit-ish tests against the real Redis fixture for RedisTaskStore."""
 
-    def test_init(self, mock_redis):
+    def test_init(self, redis_client):
         """Test RedisTaskStore initialization."""
-        store = RedisTaskStore(mock_redis, prefix="test:")
-        assert store.redis == mock_redis
+        store = RedisTaskStore(redis_client, prefix="test:")
+        assert store.redis is redis_client
         assert store.prefix == "test:"
 
-    def test_task_key_generation(self, mock_redis):
-        """Test task key generation."""
-        store = RedisTaskStore(mock_redis, prefix="task:")
-        assert store._task_key("123") == "task:123"
+    def test_task_key_generation(self, redis_client):
+        """Test owner-scoped task key generation."""
+        store = RedisTaskStore(redis_client, prefix="task:")
+        assert store._task_key("alice", "123") == "task:alice:123"
 
     @pytest.mark.asyncio
-    async def test_save_task(self, mock_redis, sample_task_data):
-        """Test task saving."""
-        from a2a.types import Task
+    async def test_save_then_get_round_trip(self, task_store):
+        """Save under TEST_CONTEXT and get back an equivalent Task."""
+        task = _build_task(task_id="rt_task")
 
-        # Create Task object from sample data
-        task = Task(**sample_task_data)
+        await task_store.save(task, TEST_CONTEXT)
+        loaded = await task_store.get("rt_task", TEST_CONTEXT)
 
-        store = RedisTaskStore(mock_redis)
-        await store.save(task)
-
-        # Verify hset was called with serialized data
-        mock_redis.hset.assert_called_once()
-        call_args = mock_redis.hset.call_args
-        assert call_args[0][0] == "task:task_123"  # key
-
-        # Check that complex data was JSON serialized
-        mapping = call_args[1]["mapping"]
-        assert "metadata" in mapping
-        assert isinstance(mapping["metadata"], str)  # Should be JSON string
-        assert json.loads(mapping["metadata"]) == sample_task_data["metadata"]
+        assert loaded is not None
+        assert loaded.id == task.id
+        assert loaded.context_id == task.context_id
+        assert loaded.status.state == task.status.state
 
     @pytest.mark.asyncio
-    async def test_save_task_with_context(self, mock_redis, sample_task_data):
-        """Test that save() accepts context parameter (SDK v0.3.x compatibility).
+    async def test_get_returns_none_for_other_owner(self, task_store):
+        """Owner isolation: another owner cannot see this owner's task."""
+        task = _build_task(task_id="iso_task")
 
-        This test verifies the fix for:
-        TypeError: RedisTaskStore.save() takes 2 positional arguments but 3 were given
-        """
-        from a2a.types import Task
-        from a2a.server.context import ServerCallContext
+        await task_store.save(task, TEST_CONTEXT)
+        loaded = await task_store.get("iso_task", TEST_CONTEXT_OTHER)
 
-        task = Task(**sample_task_data)
-        context = MagicMock(spec=ServerCallContext)
-
-        store = RedisTaskStore(mock_redis)
-        # This should not raise TypeError
-        await store.save(task, context)
-
-        mock_redis.hset.assert_called_once()
+        assert loaded is None
 
     @pytest.mark.asyncio
-    async def test_get_task_with_context(self, mock_redis):
-        """Test that get() accepts context parameter (SDK v0.3.x compatibility)."""
-        from a2a.server.context import ServerCallContext
+    async def test_delete_under_wrong_owner_is_noop(self, task_store):
+        """Delete invoked by a non-owner must leave the original task intact."""
+        task = _build_task(task_id="del_iso_task")
 
-        mock_redis.hgetall.return_value = {}
-        context = MagicMock(spec=ServerCallContext)
+        await task_store.save(task, TEST_CONTEXT)
+        await task_store.delete("del_iso_task", TEST_CONTEXT_OTHER)
 
-        store = RedisTaskStore(mock_redis)
-        # This should not raise TypeError
-        await store.get("task_123", context)
-
-        mock_redis.hgetall.assert_called_once()
+        loaded = await task_store.get("del_iso_task", TEST_CONTEXT)
+        assert loaded is not None
+        assert loaded.id == "del_iso_task"
 
     @pytest.mark.asyncio
-    async def test_delete_task_with_context(self, mock_redis):
-        """Test that delete() accepts context parameter (SDK v0.3.x compatibility)."""
-        from a2a.server.context import ServerCallContext
+    async def test_delete_under_correct_owner(self, task_store):
+        """Owner-correct delete removes the task."""
+        task = _build_task(task_id="del_task")
 
-        context = MagicMock(spec=ServerCallContext)
+        await task_store.save(task, TEST_CONTEXT)
+        await task_store.delete("del_task", TEST_CONTEXT)
 
-        store = RedisTaskStore(mock_redis)
-        # This should not raise TypeError
-        await store.delete("task_123", context)
-
-        mock_redis.delete.assert_called_once()
+        loaded = await task_store.get("del_task", TEST_CONTEXT)
+        assert loaded is None
 
     @pytest.mark.asyncio
-    async def test_get_task_exists(self, mock_redis, sample_task_data):
-        """Test retrieving an existing task."""
-
-        # Mock Redis response in the format RedisTaskStore would actually store it
-        mock_redis.hgetall.return_value = {
-            b"id": b"task_123",
-            b"context_id": b"context_456",
-            b"status": json.dumps(
-                {"_type": "a2a.types.TaskStatus", "_data": {"state": "submitted"}}
-            ).encode(),
-            b"metadata": json.dumps(sample_task_data["metadata"]).encode(),
-        }
-
-        store = RedisTaskStore(mock_redis)
-        result = await store.get("task_123")
-
-        assert result is not None
-        assert result.id == "task_123"
-        assert result.context_id == "context_456"
-        assert result.metadata == sample_task_data["metadata"]
-        mock_redis.hgetall.assert_called_once_with("task:task_123")
+    async def test_get_missing_returns_none(self, task_store):
+        """Getting a nonexistent task_id returns None."""
+        loaded = await task_store.get("never_saved", TEST_CONTEXT)
+        assert loaded is None
 
     @pytest.mark.asyncio
-    async def test_get_task_not_exists(self, mock_redis):
-        """Test retrieving a non-existent task."""
-        mock_redis.hgetall.return_value = {}
+    async def test_protocol_version_preserved(self, task_store, redis_client):
+        """protocol_version metadata is persisted on the stored hash."""
+        task = _build_task(task_id="pv_task")
+        await task_store.save(task, TEST_CONTEXT)
 
-        store = RedisTaskStore(mock_redis)
-        result = await store.get("nonexistent")
-
-        assert result is None
-        mock_redis.hgetall.assert_called_once_with("task:nonexistent")
-
-    def test_serialize_data_edge_cases(self, mock_redis):
-        """Test serialization edge cases."""
-        store = RedisTaskStore(mock_redis)
-
-        # Test with various data types
-        data = {
-            "string": "test",
-            "number": 42,
-            "boolean": True,
-            "none": None,
-            "list": [1, 2, 3],
-            "dict": {"nested": "value"},
-        }
-
-        serialized = store._serialize_data(data)
-
-        assert serialized["string"] == "test"
-        assert serialized["number"] == "42"
-        assert serialized["boolean"] == "True"
-        assert serialized["none"] == "null"
-        assert json.loads(serialized["list"]) == [1, 2, 3]
-        assert json.loads(serialized["dict"]) == {"nested": "value"}
-
-    def test_deserialize_data_edge_cases(self, mock_redis):
-        """Test deserialization edge cases."""
-        store = RedisTaskStore(mock_redis)
-
-        # Test with empty data
-        result = store._deserialize_data({})
-        assert result == {}
-
-        # Test with mixed data types
-        redis_data = {
-            b"string": b"test",
-            b"json_list": b"[1, 2, 3]",
-            b"json_dict": b'{"key": "value"}',
-            b"invalid_json": b'{"incomplete"',
-        }
-
-        result = store._deserialize_data(redis_data)
-
-        assert result["string"] == "test"
-        assert result["json_list"] == [1, 2, 3]
-        assert result["json_dict"] == {"key": "value"}
-        assert result["invalid_json"] == '{"incomplete"'  # Falls back to string
-
-    def test_serialize_data_with_pydantic_nested_model(self, mock_redis):
-        """Test serialization of nested Pydantic models."""
-        from a2a.types import TaskStatus, TaskState
-
-        store = RedisTaskStore(mock_redis)
-
-        # Test with a Pydantic model as a value
-        status = TaskStatus(state=TaskState.working)
-        data = {"status": status}
-
-        serialized = store._serialize_data(data)
-
-        # Should be JSON with type info
-        status_json = json.loads(serialized["status"])
-        assert "_type" in status_json
-        assert "_data" in status_json
-        assert status_json["_type"] == "a2a.types.TaskStatus"
-
-    def test_deserialize_data_unknown_type(self, mock_redis):
-        """Test deserialization of unknown Pydantic model type."""
-        store = RedisTaskStore(mock_redis)
-
-        # Create data with unknown type marker
-        redis_data = {
-            b"custom": json.dumps(
-                {"_type": "some.unknown.Type", "_data": {"field": "value"}}
-            ).encode()
-        }
-
-        result = store._deserialize_data(redis_data)
-
-        # Should fall back to returning just the _data dict
-        assert result["custom"] == {"field": "value"}
+        # task_store fixture uses prefix="test_task:" and TEST_CONTEXT user is 'test_user'
+        key = "test_task:test_user:pv_task"
+        stored = await redis_client.hgetall(key)
+        # Keys come back as bytes from real Redis (decode_responses=False).
+        assert stored.get(b"protocol_version") == b"1.0"
+        # task_payload should be valid JSON we can round-trip back to a Task.
+        payload = json.loads(stored[b"task_payload"].decode())
+        assert payload["id"] == "pv_task"
 
     @pytest.mark.asyncio
-    async def test_update_task_exists(self, mock_redis):
-        """Test updating an existing task."""
-        mock_redis.exists.return_value = True
+    async def test_list_raises_not_implemented(self, task_store):
+        """list() is intentionally deferred to Slice 2."""
+        from a2a.types.a2a_pb2 import ListTasksRequest
 
-        store = RedisTaskStore(mock_redis)
-        updates = {"status": "completed", "metadata": {"updated": True}}
-        result = await store.update_task("task_123", updates)
-
-        assert result is True
-        mock_redis.exists.assert_called_once_with("task:task_123")
-        mock_redis.hset.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_update_task_not_exists(self, mock_redis):
-        """Test updating a non-existent task."""
-        mock_redis.exists.return_value = False
-
-        store = RedisTaskStore(mock_redis)
-        result = await store.update_task("nonexistent", {"status": "completed"})
-
-        assert result is False
-        mock_redis.exists.assert_called_once_with("task:nonexistent")
-        mock_redis.hset.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_delete_task(self, mock_redis):
-        """Test task deletion."""
-        mock_redis.delete.return_value = 1
-
-        store = RedisTaskStore(mock_redis)
-        await store.delete("task_123")
-        mock_redis.delete.assert_called_once_with("task:task_123")
-
-    @pytest.mark.asyncio
-    async def test_delete_task_not_exists(self, mock_redis):
-        """Test deleting a non-existent task."""
-        mock_redis.delete.return_value = 0
-
-        store = RedisTaskStore(mock_redis)
-        await store.delete("nonexistent")
-        mock_redis.delete.assert_called_once_with("task:nonexistent")
-
-    @pytest.mark.asyncio
-    async def test_list_task_ids(self, mock_redis):
-        """Test listing task IDs."""
-        mock_redis.keys.return_value = [b"task:123", b"task:456", b"task:789"]
-
-        store = RedisTaskStore(mock_redis)
-        result = await store.list_task_ids()
-
-        assert result == ["123", "456", "789"]
-        mock_redis.keys.assert_called_once_with("task:*")
-
-    @pytest.mark.asyncio
-    async def test_list_task_ids_with_pattern(self, mock_redis):
-        """Test listing task IDs with pattern."""
-        mock_redis.keys.return_value = [b"task:user_123", b"task:user_456"]
-
-        store = RedisTaskStore(mock_redis)
-        result = await store.list_task_ids("user_*")
-
-        assert result == ["user_123", "user_456"]
-        mock_redis.keys.assert_called_once_with("task:user_*")
-
-    @pytest.mark.asyncio
-    async def test_task_exists(self, mock_redis):
-        """Test checking if task exists."""
-        mock_redis.exists.return_value = True
-
-        store = RedisTaskStore(mock_redis)
-        result = await store.task_exists("task_123")
-
-        assert result is True
-        mock_redis.exists.assert_called_once_with("task:task_123")
-
-
-class TestRedisTaskStoreIntegration:
-    """Integration tests for RedisTaskStore with real Redis."""
-
-    @pytest.mark.asyncio
-    async def test_full_task_lifecycle(self, task_store, sample_task_data):
-        """Test complete task lifecycle with real Redis."""
-        from a2a.types import Task, TaskStatus, TaskState
-
-        # Create task with different ID to avoid conflicts
-        task_data = sample_task_data.copy()
-        task_data["id"] = "integration_test_task"
-        task = Task(**task_data)
-        task_id = task.id
-
-        # Task should not exist initially
-        assert not await task_store.task_exists(task_id)
-        assert await task_store.get(task_id) is None
-
-        # Save task
-        await task_store.save(task)
-        assert await task_store.task_exists(task_id)
-
-        # Retrieve task
-        retrieved_task = await task_store.get(task_id)
-        assert retrieved_task is not None
-        assert retrieved_task.id == task.id
-        assert retrieved_task.status.state == task.status.state
-        assert retrieved_task.metadata == task.metadata
-
-        # Update task
-        updates = {
-            "status": TaskStatus(state=TaskState.working),
-            "metadata": {"progress": 50},
-        }
-        assert await task_store.update_task(task_id, updates)
-
-        updated_task = await task_store.get(task_id)
-        assert updated_task is not None
-        assert updated_task.status.state == TaskState.working
-        # Check that metadata was updated
-        assert updated_task.metadata["progress"] == 50
-
-        # List tasks
-        task_list = await task_store.list_task_ids()
-        assert task_id in task_list
-
-        # Delete task
-        await task_store.delete(task_id)
-        assert not await task_store.task_exists(task_id)
-        assert await task_store.get(task_id) is None
+        with pytest.raises(NotImplementedError):
+            await task_store.list(ListTasksRequest(), TEST_CONTEXT)
 
 
 class TestRedisJSONTaskStore:
