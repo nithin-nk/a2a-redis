@@ -1,193 +1,200 @@
-"""Tests for RedisPushNotificationConfigStore."""
+"""Tests for RedisPushNotificationConfigStore (v1.1 contract)."""
 
-import json
+from __future__ import annotations
+
 import pytest
 
+from a2a.types.a2a_pb2 import TaskPushNotificationConfig
+
 from a2a_redis.push_notification_config_store import RedisPushNotificationConfigStore
-from a2a.types import TaskPushNotificationConfig as PushNotificationConfig
+
+from tests.conftest import TEST_CONTEXT, TEST_CONTEXT_OTHER
+
+
+pytestmark = pytest.mark.asyncio
+
+
+def make_push_config(
+    config_id: str, url: str = "https://example.com/hook", token: str = "tok"
+) -> TaskPushNotificationConfig:
+    """Build a TaskPushNotificationConfig proto for tests."""
+    return TaskPushNotificationConfig(id=config_id, url=url, token=token)
 
 
 class TestRedisPushNotificationConfigStore:
-    """Tests for RedisPushNotificationConfigStore."""
+    """Integration tests for RedisPushNotificationConfigStore."""
 
-    def test_init(self, mock_redis):
-        """Test RedisPushNotificationConfigStore initialization."""
-        store = RedisPushNotificationConfigStore(mock_redis, prefix="push:")
-        assert store.redis == mock_redis
-        assert store.prefix == "push:"
+    async def test_set_then_get_round_trip(self, redis_client):
+        store = RedisPushNotificationConfigStore(redis_client, prefix="rt:")
+        task_id = "task-rt"
+        cfg = make_push_config("cfg-1", "https://hook.example/a")
 
-    def test_task_key_generation(self, mock_redis):
-        """Test task key generation."""
-        store = RedisPushNotificationConfigStore(mock_redis, prefix="push:")
-        key = store._task_key("task_123")
-        assert key == "push:task_123"
-
-    @pytest.mark.asyncio
-    async def test_get_info_empty(self, mock_redis):
-        """Test getting configs when none exist."""
-        mock_redis.hgetall.return_value = {}
-
-        store = RedisPushNotificationConfigStore(mock_redis)
-        configs = await store.get_info("task_123")
-
-        assert configs == []
-        mock_redis.hgetall.assert_called_once_with("push_config:task_123")
-
-    @pytest.mark.asyncio
-    async def test_get_info_with_configs(self, mock_redis):
-        """Test getting existing configs."""
-        # Mock Redis response
-        config_data = {"url": "https://example.com/webhook", "token": "test_token"}
-        mock_redis.hgetall.return_value = {
-            b"config_1": json.dumps(config_data).encode()
-        }
-
-        store = RedisPushNotificationConfigStore(mock_redis)
-        configs = await store.get_info("task_123")
+        await store.set_info(task_id, cfg, TEST_CONTEXT)
+        configs = await store.get_info(task_id, TEST_CONTEXT)
 
         assert len(configs) == 1
-        assert isinstance(configs[0], PushNotificationConfig)
-        assert configs[0].url == "https://example.com/webhook"
-        assert configs[0].token == "test_token"
-        assert configs[0].id == "config_1"
+        assert configs[0].id == "cfg-1"
+        assert configs[0].url == "https://hook.example/a"
+        assert configs[0].token == "tok"
 
-    @pytest.mark.asyncio
-    async def test_get_info_invalid_json(self, mock_redis):
-        """Test getting configs with invalid JSON data."""
-        mock_redis.hgetall.return_value = {
-            b"config_1": b"invalid json data",
-            b"config_2": json.dumps({"url": "https://valid.com"}).encode(),
-        }
+    async def test_multi_config_per_task(self, redis_client):
+        store = RedisPushNotificationConfigStore(redis_client, prefix="multi:")
+        task_id = "task-multi"
 
-        store = RedisPushNotificationConfigStore(mock_redis)
-        configs = await store.get_info("task_123")
+        await store.set_info(task_id, make_push_config("c1", "https://h1"), TEST_CONTEXT)
+        await store.set_info(task_id, make_push_config("c2", "https://h2"), TEST_CONTEXT)
 
-        # Should only return valid configs
+        configs = await store.get_info(task_id, TEST_CONTEXT)
+        ids = sorted(c.id for c in configs)
+        urls = sorted(c.url for c in configs)
+        assert ids == ["c1", "c2"]
+        assert urls == ["https://h1", "https://h2"]
+
+    async def test_owner_isolation_on_get_info(self, redis_client):
+        store = RedisPushNotificationConfigStore(redis_client, prefix="iso:")
+        task_id = "task-iso"
+
+        await store.set_info(task_id, make_push_config("c1"), TEST_CONTEXT)
+
+        assert await store.get_info(task_id, TEST_CONTEXT_OTHER) == []
+        # Owner that did the write still sees it.
+        assert len(await store.get_info(task_id, TEST_CONTEXT)) == 1
+
+    async def test_delete_specific_config(self, redis_client):
+        store = RedisPushNotificationConfigStore(redis_client, prefix="delone:")
+        task_id = "task-delone"
+
+        await store.set_info(task_id, make_push_config("c1", "https://h1"), TEST_CONTEXT)
+        await store.set_info(task_id, make_push_config("c2", "https://h2"), TEST_CONTEXT)
+
+        await store.delete_info(task_id, TEST_CONTEXT, config_id="c1")
+
+        configs = await store.get_info(task_id, TEST_CONTEXT)
         assert len(configs) == 1
-        assert configs[0].url == "https://valid.com"
+        assert configs[0].id == "c2"
 
-    @pytest.mark.asyncio
-    async def test_set_info_new_config(self, mock_redis):
-        """Test setting a new config."""
-        mock_redis.hgetall.return_value = {}  # No existing configs
+    async def test_delete_all_configs_for_task(self, redis_client):
+        store = RedisPushNotificationConfigStore(redis_client, prefix="delall:")
+        task_id = "task-delall"
 
-        config = PushNotificationConfig(
-            url="https://example.com/webhook", token="test_token", id="my_config"
+        await store.set_info(task_id, make_push_config("c1"), TEST_CONTEXT)
+        await store.set_info(task_id, make_push_config("c2"), TEST_CONTEXT)
+
+        await store.delete_info(task_id, TEST_CONTEXT, config_id=None)
+
+        assert await store.get_info(task_id, TEST_CONTEXT) == []
+
+    async def test_delete_under_wrong_owner_is_noop(self, redis_client):
+        store = RedisPushNotificationConfigStore(redis_client, prefix="wrongown:")
+        task_id = "task-wrongown"
+
+        await store.set_info(task_id, make_push_config("c1"), TEST_CONTEXT)
+
+        # Wrong owner attempts both targeted and bulk deletes — both are no-ops.
+        await store.delete_info(task_id, TEST_CONTEXT_OTHER, config_id="c1")
+        await store.delete_info(task_id, TEST_CONTEXT_OTHER, config_id=None)
+
+        configs = await store.get_info(task_id, TEST_CONTEXT)
+        assert len(configs) == 1
+        assert configs[0].id == "c1"
+
+    async def test_get_info_for_dispatch_returns_configs_across_owners(
+        self, redis_client
+    ):
+        store = RedisPushNotificationConfigStore(redis_client, prefix="disp:")
+        task_id = "task-disp"
+
+        await store.set_info(
+            task_id, make_push_config("c1", "https://h1"), TEST_CONTEXT
+        )
+        await store.set_info(
+            task_id, make_push_config("c2", "https://h2"), TEST_CONTEXT_OTHER
         )
 
-        store = RedisPushNotificationConfigStore(mock_redis)
-        await store.set_info("task_123", config)
+        configs = await store.get_info_for_dispatch(task_id)
 
-        # Should call hset with the config data
-        mock_redis.hset.assert_called_once()
-        call_args = mock_redis.hset.call_args
-        assert call_args[0][0] == "push_config:task_123"  # key
-        assert call_args[0][1] == "my_config"  # field (config id)
+        ids = sorted(c.id for c in configs)
+        urls = sorted(c.url for c in configs)
+        assert ids == ["c1", "c2"]
+        assert urls == ["https://h1", "https://h2"]
 
-        # Check serialized config data
-        config_json = call_args[0][2]
-        config_data = json.loads(config_json)
-        assert config_data["url"] == "https://example.com/webhook"
-        assert config_data["token"] == "test_token"
-        assert "id" not in config_data  # ID should be excluded from stored data
+        # Sanity: per-owner get_info still partitions correctly.
+        own_a = await store.get_info(task_id, TEST_CONTEXT)
+        own_b = await store.get_info(task_id, TEST_CONTEXT_OTHER)
+        assert len(own_a) == 1 and own_a[0].id == "c1"
+        assert len(own_b) == 1 and own_b[0].id == "c2"
 
-    @pytest.mark.asyncio
-    async def test_set_info_auto_generate_id(self, mock_redis):
-        """Test setting config with auto-generated ID."""
-        mock_redis.hgetall.return_value = {}  # No existing configs
+    async def test_encryption_round_trip(self, redis_client):
+        Fernet = pytest.importorskip("cryptography.fernet").Fernet
+        key = Fernet.generate_key()
 
-        config = PushNotificationConfig(url="https://example.com/webhook")
-
-        store = RedisPushNotificationConfigStore(mock_redis)
-        await store.set_info("task_123", config)
-
-        mock_redis.hset.assert_called_once()
-        call_args = mock_redis.hset.call_args
-        assert call_args[0][1] == "config_0"  # Auto-generated ID
-
-    @pytest.mark.asyncio
-    async def test_delete_info_specific_config(self, mock_redis):
-        """Test deleting a specific config."""
-        store = RedisPushNotificationConfigStore(mock_redis)
-        await store.delete_info("task_123", "config_1")
-
-        mock_redis.hdel.assert_called_once_with("push_config:task_123", "config_1")
-        mock_redis.delete.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_delete_info_all_configs(self, mock_redis):
-        """Test deleting all configs for a task."""
-        store = RedisPushNotificationConfigStore(mock_redis)
-        await store.delete_info("task_123")
-
-        mock_redis.delete.assert_called_once_with("push_config:task_123")
-        mock_redis.hdel.assert_not_called()
-
-
-class TestRedisPushNotificationConfigStoreIntegration:
-    """Integration tests for RedisPushNotificationConfigStore with real Redis."""
-
-    @pytest.mark.asyncio
-    async def test_full_config_lifecycle(self, push_config_store):
-        """Test complete config lifecycle with real Redis."""
-        task_id = "integration_test_task"
-
-        # Should have no configs initially
-        configs = await push_config_store.get_info(task_id)
-        assert len(configs) == 0
-
-        # Create config
-        config1 = PushNotificationConfig(
-            url="https://webhook1.example.com", token="token1", id="config1"
+        store = RedisPushNotificationConfigStore(
+            redis_client, prefix="enc:", encryption_key=key
         )
-        await push_config_store.set_info(task_id, config1)
+        task_id = "task-enc"
+        cfg = make_push_config("c1", "https://hook.example/secret", token="s3cret")
 
-        # Retrieve configs
-        configs = await push_config_store.get_info(task_id)
-        assert len(configs) == 1
-        assert configs[0].url == "https://webhook1.example.com"
-        assert configs[0].token == "token1"
-        assert configs[0].id == "config1"
+        await store.set_info(task_id, cfg, TEST_CONTEXT)
 
-        # Add another config
-        config2 = PushNotificationConfig(
-            url="https://webhook2.example.com", id="config2"
+        # Raw bytes in Redis must NOT contain the plaintext payload.
+        raw_key = store._config_key(
+            store.owner_resolver(TEST_CONTEXT), task_id, "c1"
         )
-        await push_config_store.set_info(task_id, config2)
+        raw = await redis_client.get(raw_key)
+        assert raw is not None
+        assert b"https://hook.example/secret" not in raw
+        assert b"s3cret" not in raw
 
-        configs = await push_config_store.get_info(task_id)
-        assert len(configs) == 2
-
-        # Delete specific config
-        await push_config_store.delete_info(task_id, "config1")
-        configs = await push_config_store.get_info(task_id)
+        # Round-trip via get_info still returns the original config.
+        configs = await store.get_info(task_id, TEST_CONTEXT)
         assert len(configs) == 1
-        assert configs[0].id == "config2"
+        assert configs[0].url == "https://hook.example/secret"
+        assert configs[0].token == "s3cret"
 
-        # Delete all configs
-        await push_config_store.delete_info(task_id)
-        configs = await push_config_store.get_info(task_id)
-        assert len(configs) == 0
+    async def test_tampered_ciphertext_raises(self, redis_client):
+        fernet_mod = pytest.importorskip("cryptography.fernet")
+        Fernet = fernet_mod.Fernet
+        InvalidToken = fernet_mod.InvalidToken
 
-    @pytest.mark.asyncio
-    async def test_config_persistence(self, redis_client):
-        """Test that configs persist across store instances."""
-        task_id = "persist_test"
-
-        # Create config with first store instance
-        store1 = RedisPushNotificationConfigStore(redis_client, prefix="persist:")
-        config = PushNotificationConfig(
-            url="https://persistent.example.com", token="persist_token"
+        key = Fernet.generate_key()
+        store = RedisPushNotificationConfigStore(
+            redis_client, prefix="tamp:", encryption_key=key
         )
-        await store1.set_info(task_id, config)
+        task_id = "task-tamp"
+        await store.set_info(
+            task_id, make_push_config("c1", "https://h"), TEST_CONTEXT
+        )
 
-        # Create new store instance (simulating restart)
-        store2 = RedisPushNotificationConfigStore(redis_client, prefix="persist:")
-        configs = await store2.get_info(task_id)
+        raw_key = store._config_key(
+            store.owner_resolver(TEST_CONTEXT), task_id, "c1"
+        )
+        # Overwrite with garbage so Fernet decrypt fails.
+        await redis_client.set(raw_key, b"not-a-valid-fernet-token")
 
-        assert len(configs) == 1
-        assert configs[0].url == "https://persistent.example.com"
-        assert configs[0].token == "persist_token"
+        with pytest.raises(InvalidToken):
+            await store.get_info(task_id, TEST_CONTEXT)
 
-        # Cleanup
-        await store2.delete_info(task_id)
+    async def test_encryption_required_when_key_present_but_data_unencrypted(
+        self, redis_client
+    ):
+        fernet_mod = pytest.importorskip("cryptography.fernet")
+        Fernet = fernet_mod.Fernet
+        InvalidToken = fernet_mod.InvalidToken
+
+        # First, write plaintext via an unencrypted store.
+        plain_store = RedisPushNotificationConfigStore(
+            redis_client, prefix="mix:"
+        )
+        task_id = "task-mix"
+        await plain_store.set_info(
+            task_id, make_push_config("c1", "https://h"), TEST_CONTEXT
+        )
+
+        # Now read with an encrypted store using the SAME prefix —
+        # the existing payload is unencrypted JSON, so Fernet.decrypt rejects it.
+        key = Fernet.generate_key()
+        enc_store = RedisPushNotificationConfigStore(
+            redis_client, prefix="mix:", encryption_key=key
+        )
+        with pytest.raises(InvalidToken):
+            await enc_store.get_info(task_id, TEST_CONTEXT)

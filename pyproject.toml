@@ -41,6 +41,7 @@ dev = [
     "mypy",
     "ruff",
 ]
+encryption = ["cryptography>=42.0"]
 
 [project.urls]
 Homepage = "https://github.com/redis-developer/a2a-redis"
