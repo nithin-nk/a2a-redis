@@ -101,6 +101,9 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "--cov=a2a_redis --cov-report=term-missing"
+markers = [
+    "e2e: end-to-end subprocess-driven tests (opt out with -m 'not e2e')",
+]
 
 [dependency-groups]
 dev = [
